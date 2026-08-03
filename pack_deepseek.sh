@@ -5,14 +5,34 @@ set -e
 # 脚本所在目录（兼容从任意位置调用）
 cd "$(dirname "$0")"
 
-# ========== 0. 前置条件检查 ==========
+# ========== 0. 前置条件检查（缺失则自动安装） ==========
+MISSING=""
 for cmd in node openssl pake; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "[pack] 缺少依赖: $cmd"
-    echo "      安装: brew install $cmd"
-    exit 1
+    MISSING="$MISSING $cmd"
   fi
 done
+
+if [ -n "$MISSING" ]; then
+  echo "[pack] 缺少依赖:$MISSING"
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "[pack] 未检测到 Homebrew，请先手动安装依赖:"
+    echo "      brew install node openssl pake"
+    echo "      或安装 Homebrew: https://brew.sh"
+    exit 1
+  fi
+  for cmd in $MISSING; do
+    echo "[pack] brew install $cmd ..."
+    brew install "$cmd"
+  done
+  # 重新验证
+  for cmd in node openssl pake; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "[pack] 安装后仍缺少: $cmd，请手动安装: brew install $cmd"
+      exit 1
+    fi
+  done
+fi
 echo "[pack] 依赖检查通过 (node/openssl/pake)"
 
 # ========== 1. 清理可能干扰 Rust 编译的环境变量 ==========
