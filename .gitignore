@@ -1,0 +1,15 @@
+# 证书与密钥（首次由 pack_deepseek.sh 生成，不入库）
+cert.pem
+key.pem
+
+# 对话数据（本地隐私）
+data/
+
+# 日志
+bridge.log
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/

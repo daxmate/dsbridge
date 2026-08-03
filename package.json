@@ -1,0 +1,13 @@
+{
+  "name": "dsbridge",
+  "version": "0.1.0",
+  "description": "DeepSeek 桌面版对话本地桥：注入脚本抓对话 → Node 服务写 jsonl → OpenClaw 按需读取",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
