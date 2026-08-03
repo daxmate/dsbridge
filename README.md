@@ -48,6 +48,12 @@
 
 ## 快速开始
 
+### 0. 前置条件（macOS）
+
+- **Node.js ≥ 18**（本地桥运行时；Homebrew：`brew install node`）
+- **Pake**（打包工具；Homebrew：`brew install pake`）
+- **OpenSSL**（首次生成自签证书；macOS 自带，一般无需安装）
+
 ### 1. 一键打包（推荐）
 
 ```bash

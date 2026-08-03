@@ -5,6 +5,16 @@ set -e
 # 脚本所在目录（兼容从任意位置调用）
 cd "$(dirname "$0")"
 
+# ========== 0. 前置条件检查 ==========
+for cmd in node openssl pake; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "[pack] 缺少依赖: $cmd"
+    echo "      安装: brew install $cmd"
+    exit 1
+  fi
+done
+echo "[pack] 依赖检查通过 (node/openssl/pake)"
+
 # ========== 1. 清理可能干扰 Rust 编译的环境变量 ==========
 # Pake 打包需要编译 Rust，若外部设置了 CC/CXX（如某些工具链），
 # 会导致编译失败，这里统一 unset。
