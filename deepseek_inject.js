@@ -23,6 +23,8 @@ const ICON_SYNC = `<svg ${ICON_COMMON}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0
 const ICON_EXPORT = `<svg ${ICON_COMMON}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>`;
 // 复制：双层矩形
 const ICON_COPY = `<svg ${ICON_COMMON}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+// 浏览器打开：外部链接箭头
+const ICON_EXTERNAL = `<svg ${ICON_COMMON}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
 
 // ========== 添加功能按钮 ==========
 function addButtons() {
@@ -32,6 +34,7 @@ function addButtons() {
     <button id="pake-sync">${ICON_SYNC}同步到本地</button>
     <button id="pake-export">${ICON_EXPORT}导出</button>
     <button id="pake-copy">${ICON_COPY}复制全部</button>
+    <button id="pake-open">${ICON_EXTERNAL}浏览器打开</button>
   `;
 
   // 样式 —— 用 DeepSeek 品牌蓝
@@ -69,6 +72,7 @@ function addButtons() {
     #pake-tools button:active {
       opacity: 0.85;
     }
+    /* 打印相关样式已移除：方案 B 走本地桥生成打印页，不再依赖页面内 @media print */
   `;
 
   document.head.appendChild(style);
@@ -77,6 +81,7 @@ function addButtons() {
   document.getElementById('pake-sync').onclick = syncToBridge;
   document.getElementById('pake-export').onclick = exportConversation;
   document.getElementById('pake-copy').onclick = copyAll;
+  document.getElementById('pake-open').onclick = openInBrowser;
 }
 
 // ========== 自动同步 ==========
@@ -90,18 +95,18 @@ let autoSyncEnabled = true;
 
 function messageKey(m, i) { return i; }
 
-async function postToBridge(messages) {
+async function postToBridge(messages, endpoint = '/append') {
   const urls = [DSBRIDGE_URL, ...DSBRIDGE_FALLBACK_URLS];
   let lastErr = null;
   for (const url of urls) {
     try {
-      const res = await fetch(`${url}/append`, {
+      const res = await fetch(`${url}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(messages),
       });
       const result = await res.json();
-      if (result.ok) return { ok: true, appended: result.appended };
+      if (result.ok) return { ok: true, ...result };
       lastErr = new Error(`HTTP ${res.status}: ${result.error || res.statusText}`);
     } catch (e) {
       lastErr = e;
@@ -185,6 +190,23 @@ async function exportConversation() {
   a.download = `deepseek-${new Date().toISOString().slice(0, 10)}.md`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// ========== 在浏览器打开当前对话 ==========
+// 把当前对话的 chat.deepseek.com 地址交给系统默认浏览器打开，
+// 利用网页版的 Markdown/LaTeX 渲染能力查看/复制/打印。
+async function openInBrowser() {
+  const url = window.location.href;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    showTip('⚠️ 获取当前地址失败', '#f59e0b');
+    return;
+  }
+  const result = await postToBridge({ url }, '/open-url');
+  if (result.ok) {
+    showTip('✓ 已在浏览器打开', '#10b981');
+  } else {
+    showTip(`✗ 打开失败: ${(result.error && result.error.message) || result.error}`, '#ef4444');
+  }
 }
 
 // ========== 复制全部 ==========

@@ -20,6 +20,8 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execFile } = require('child_process');
 
 const PORT = Number(process.env.DSBRIDGE_PORT) || 8787;   // HTTPS 端口
 const HTTP_PORT = Number(process.env.DSBRIDGE_HTTP_PORT) || 8786; // HTTP 备用端口
@@ -82,6 +84,21 @@ function handleAppend(body) {
   return { ok: true, file, appended: out.length, total: seen.size };
 }
 
+/**
+ * 在系统默认浏览器中打开指定 URL（当前对话的 chat.deepseek.com 地址）。
+ */
+function handleOpenUrl(body) {
+  const url = (body && body.url) || '';
+  // 安全校验：只允许 DeepSeek 站内 http(s) 地址
+  if (typeof url !== 'string' || !/^https?:\/\/(www\.)?chat\.deepseek\.com/i.test(url)) {
+    return { ok: false, error: 'invalid url' };
+  }
+  execFile('open', [url], (err) => {
+    if (err) console.error('[dsbridge] 打开 URL 失败:', err.message);
+  });
+  return { ok: true, url };
+}
+
 function handleRequest(req, res) {
   // CORS：允许 DeepSeek 页面跨域调用
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -93,12 +110,14 @@ function handleRequest(req, res) {
     return res.end();
   }
 
-  if (req.method === 'POST' && req.url === '/append') {
+  if (req.method === 'POST' && (req.url === '/append' || req.url === '/open-url')) {
     let data = '';
     req.on('data', (c) => { data += c; });
     req.on('end', () => {
       try {
-        const result = handleAppend(JSON.parse(data));
+        const parsed = JSON.parse(data);
+        const result =
+          req.url === '/open-url' ? handleOpenUrl(parsed) : handleAppend(parsed);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {
