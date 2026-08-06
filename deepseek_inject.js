@@ -37,9 +37,16 @@ function addButtons() {
     <button id="pake-open">${ICON_EXTERNAL}浏览器打开</button>
   `;
 
-  // 样式 —— 用 DeepSeek 品牌蓝
+  // 样式 —— 对齐 DeepSeek 原生按钮（ds-button outlinedNeutral 变体）：
+  //   胶囊圆角 / 透明底 / 1px 浅灰边框 / 深色文字 / hover 浅灰底
+  // 取值来自 chat.deepseek.com 的 main.css 变量：
+  //   --dsw-alias-border-l2: rgba(0,0,0,.1)
+  //   --dsw-alias-interactive-bg-hover: rgba(38,49,72,.06)
+  //   --dsw-alias-label-primary: #0f1115
   const style = document.createElement('style');
   style.textContent = `
+    /* 注：红绿灯避让不再需要 —— 打包时已去掉 --hide-title-bar，
+       由 macOS 原生标题栏容纳红绿灯，页面内容天然从标题栏下方开始 */
     #pake-tools {
       position: fixed;
       top: 12px;
@@ -51,26 +58,28 @@ function addButtons() {
     #pake-tools button {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
-      padding: 6px 14px;
-      border: none;
-      border-radius: 6px;
-      background: ${DS_BLUE};
-      color: white;
-      font-size: 13px;
+      gap: 6px;
+      height: 36px;
+      padding: 0 14px;
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      border-radius: 999px;
+      background: transparent;
+      color: #0f1115;
+      font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
-      transition: background 0.2s, opacity 0.2s;
+      transition: background-color 0.2s, border-color 0.2s;
     }
     #pake-tools button svg {
-      width: 14px;
-      height: 14px;
+      width: 16px;
+      height: 16px;
       flex-shrink: 0;
     }
     #pake-tools button:hover {
-      background: ${DS_BLUE_LIGHT};
+      background: rgba(38, 49, 72, 0.06);
     }
     #pake-tools button:active {
-      opacity: 0.85;
+      background: rgba(38, 49, 72, 0.1);
     }
     /* 打印相关样式已移除：方案 B 走本地桥生成打印页，不再依赖页面内 @media print */
   `;

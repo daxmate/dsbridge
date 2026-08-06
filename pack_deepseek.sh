@@ -109,4 +109,4 @@ fi
 echo "[pack] 开始打包 DeepSeek..."
 pake https://chat.deepseek.com --name DeepSeek \
   --inject "$(pwd)/deepseek_inject.js" \
-  --hide-title-bar --hide-on-close --install
+  --hide-on-close --install
