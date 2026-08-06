@@ -4,6 +4,10 @@
 
 在 DeepSeek 网页版（Pake 打包的 macOS 桌面 App）里自动保存你与 DeepSeek 的对话到本地文件，供 OpenClaw（或其他工具）随时读取、衔接续聊。
 
+<p align="center">
+  <img src="screenshot.png" alt="DeepSeek 桌面版界面" width="720">
+</p>
+
 > ⚠️ **平台说明：目前仅支持 macOS。**
 > 本项目针对 macOS 的 WKWebView 行为和 `security`/`launchd` 命令编写。
 > - 证书信任使用 `security add-trusted-cert`（macOS 专用）
