@@ -99,6 +99,154 @@ function handleOpenUrl(body) {
   return { ok: true, url };
 }
 
+// ========== 邮件（Apple Mail / AppleScript，免登录） ==========
+// 仅本机 Apple Mail 的 Senkori 账号；只读三个文件夹，排除 Junk/Deleted/Drafts/Starred。
+const MAIL_ACCOUNT = 'Senkori';
+const MAIL_BOXES = ['INBOX', 'Archive', 'Sent Messages'];
+const MAIL_DEFAULT_LIMIT = 20;   // /mails 默认返回条数
+const MAIL_MAX_LIMIT = 50;       // /mails 单次上限
+const MAIL_LOOKUP_WINDOW = 200;  // /mail 按 id 命中的最近消息范围（避免全库 whose）
+const MAIL_BODY_MAX = 20000;     // 正文最大字符数（超出砍尾部、保留头部）
+
+// AppleScript 字符串字面量转义（只用固定白名单值 / 数字，不拼用户输入）
+function asStr(value) {
+  return '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+// 字段清洗 handler：把 CR/LF/Tab 换成空格，保证 TSV 输出不串行
+const AS_SANITIZE_HANDLER = `
+on asSanitized(s)
+	set s to s as text
+	set AppleScript's text item delimiters to {return, linefeed, tab}
+	set chunks to every text item of s
+	set AppleScript's text item delimiters to " "
+	set r to chunks as text
+	set AppleScript's text item delimiters to ""
+	return r
+end asSanitized`;
+
+// AppleScript 调用唯一入口（任何 Apple Mail 交互都走这里）
+function runAppleScript(script) {
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-e', script], { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
+  });
+}
+
+// 列出某邮箱最近 limit 封（messages 1 thru N 即最新在前，已实测）
+function buildListScript(mailbox, limit) {
+  return `tell application "Mail"
+	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
+	set cnt to count of messages of mb
+	set lim to ${limit}
+	if cnt > lim then set cnt to lim
+	set out to ""
+	repeat with i from 1 to cnt
+		set m to message i of mb
+		set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
+	end repeat
+	return out
+end tell
+
+${AS_SANITIZE_HANDLER}`;
+}
+
+// 取某封正文：先在最近窗口内按 id 命中，未命中才回退全库 whose（实测 Archive 52k 也仅约 1s）
+function buildBodyScript(mailbox, id) {
+  return `tell application "Mail"
+	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
+	set cnt to count of messages of mb
+	set lim to ${MAIL_LOOKUP_WINDOW}
+	if cnt > lim then set cnt to lim
+	set found to missing value
+	repeat with i from 1 to cnt
+		set m to message i of mb
+		if (id of m) = ${id} then
+			set found to m
+			exit repeat
+		end if
+	end repeat
+	if found is missing value then
+		try
+			set found to (first message of mb whose id = ${id})
+		end try
+	end if
+	if found is missing value then return "ERROR:notfound"
+	set bodyText to (content of found) as text
+	return (my asSanitized(subject of found)) & tab & (my asSanitized(sender of found)) & tab & (((date received of found) as «class isot») as string) & linefeed & bodyText
+end tell
+
+${AS_SANITIZE_HANDLER}`;
+}
+
+function parseListOutput(stdout, mailbox) {
+  const messages = [];
+  for (const line of String(stdout).split('\n')) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts.length < 4) continue;
+    const id = Number(parts[0]);
+    if (!Number.isFinite(id)) continue;
+    messages.push({ id, subject: parts[1], sender: parts[2], date: parts[3], mailbox });
+  }
+  return messages;
+}
+
+// 保留头部、砍掉尾部；避免把代理对（emoji 等）拦腰截断
+function truncateBody(text, max) {
+  const s = text == null ? '' : String(text);
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max);
+  const code = cut.charCodeAt(cut.length - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
+}
+
+// POST /mails —— 列出某邮箱最近 N 封
+async function handleMails(body) {
+  const mailbox = body && body.mailbox;
+  if (!MAIL_BOXES.includes(mailbox)) return { ok: false, error: 'invalid mailbox' };
+  let limit = Number(body && body.limit);
+  if (!Number.isFinite(limit) || limit <= 0) limit = MAIL_DEFAULT_LIMIT;
+  if (limit > MAIL_MAX_LIMIT) limit = MAIL_MAX_LIMIT;
+  try {
+    const stdout = await runAppleScript(buildListScript(mailbox, limit));
+    return { ok: true, mailbox, messages: parseListOutput(stdout, mailbox) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// POST /mail —— 取某封正文
+async function handleMail(body) {
+  const mailbox = body && body.mailbox;
+  if (!MAIL_BOXES.includes(mailbox)) return { ok: false, error: 'invalid mailbox' };
+  const id = Number(body && body.id);
+  if (!Number.isFinite(id)) return { ok: false, error: 'invalid id' };
+  try {
+    const stdout = await runAppleScript(buildBodyScript(mailbox, id));
+    if (String(stdout).startsWith('ERROR:notfound')) return { ok: false, error: 'message not found' };
+    const nl = stdout.indexOf('\n');
+    const header = nl >= 0 ? stdout.slice(0, nl) : stdout;
+    const rawBody = nl >= 0 ? stdout.slice(nl + 1) : '';
+    const [subject, sender, date] = header.split('\t');
+    return {
+      ok: true,
+      message: { id, subject, sender, date, mailbox, body: truncateBody(rawBody, MAIL_BODY_MAX) },
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// POST /probe —— 注入脚本上报 DOM 探测信息，仅写 bridge.log，不落 data/
+function handleProbe(body) {
+  console.log('[dsbridge][probe]', JSON.stringify(body));
+  return { ok: true };
+}
+
 function handleRequest(req, res) {
   // CORS：允许 DeepSeek 页面跨域调用
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -110,14 +258,21 @@ function handleRequest(req, res) {
     return res.end();
   }
 
-  if (req.method === 'POST' && (req.url === '/append' || req.url === '/open-url')) {
+  const pathname = req.url.split('?')[0];
+  const postRoutes = ['/append', '/open-url', '/mails', '/mail', '/probe'];
+
+  if (req.method === 'POST' && postRoutes.includes(pathname)) {
     let data = '';
     req.on('data', (c) => { data += c; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const parsed = JSON.parse(data);
-        const result =
-          req.url === '/open-url' ? handleOpenUrl(parsed) : handleAppend(parsed);
+        let result;
+        if (pathname === '/open-url') result = handleOpenUrl(parsed);
+        else if (pathname === '/append') result = handleAppend(parsed);
+        else if (pathname === '/mails') result = await handleMails(parsed);
+        else if (pathname === '/mail') result = await handleMail(parsed);
+        else result = handleProbe(parsed);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {
@@ -128,7 +283,7 @@ function handleRequest(req, res) {
     return;
   }
 
-  if (req.method === 'GET' && req.url === '/') {
+  if (req.method === 'GET' && pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, name: 'dsbridge', port: PORT, dataDir: DATA_DIR }));
     return;
