@@ -25,6 +25,8 @@ const ICON_EXPORT = `<svg ${ICON_COMMON}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0
 const ICON_COPY = `<svg ${ICON_COMMON}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 // 浏览器打开：外部链接箭头
 const ICON_EXTERNAL = `<svg ${ICON_COMMON}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
+// 邮件：信封
+const ICON_MAIL = `<svg ${ICON_COMMON}><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>`;
 
 // ========== 添加功能按钮 ==========
 function addButtons() {
@@ -266,9 +268,379 @@ function formatAsText(messages) {
   ).join('\n\n---\n\n');
 }
 
+// ========== 邮件作为附件（Apple Mail → DeepSeek） ==========
+// 依赖本地桥：/mails（列表）、/mail（正文）、/probe（诊断）。仅 Senkori 账号。
+const MAIL_TABS = [
+  { key: 'INBOX', label: '收件箱' },
+  { key: 'Archive', label: '归档' },
+  { key: 'Sent Messages', label: '已发送' },
+];
+const MAIL_PAGE_STEP = 20;
+const MAIL_PAGE_MAX = 50;
+
+const mailState = {
+  tab: 'INBOX',
+  lists: {},            // mailbox -> { messages:[], limit, reachedEnd, loading, error }
+  selected: new Set(),  // 'mailbox:id'
+  filter: '',
+};
+
+function mailKey(mailbox, id) { return mailbox + ':' + id; }
+
+function getMailList(mailbox) {
+  if (!mailState.lists[mailbox]) {
+    mailState.lists[mailbox] = { messages: [], limit: MAIL_PAGE_STEP, reachedEnd: false, loading: false, error: null };
+  }
+  return mailState.lists[mailbox];
+}
+
+// 定位 DeepSeek 输入框工具栏的"添加附件/回形针"按钮（启发式）
+function findAttachButton() {
+  var sels = [
+    'button[aria-label*="附件"]',
+    'button[aria-label*="attach" i]',
+    'button[aria-label*="upload" i]',
+    'button[aria-label*="file" i]',
+    '[data-testid*="attach" i] button',
+  ];
+  for (var i = 0; i < sels.length; i++) {
+    try { var b = document.querySelector(sels[i]); if (b) return b; } catch (e) { /* 忽略非法选择器 */ }
+  }
+  var input = document.querySelector('input[type=file]');
+  if (input) {
+    var p = input.parentElement;
+    for (var k = 0; k < 4 && p; k++) { var btn = p.querySelector('button'); if (btn) return btn; p = p.parentElement; }
+  }
+  return null;
+}
+
+function findFileInput() { return document.querySelector('input[type=file]'); }
+function findComposer() {
+  return document.querySelector('div[contenteditable="true"]') || document.querySelector('textarea');
+}
+
+function createMailButton(parent, afterEl) {
+  if (document.getElementById('ds-mail-btn')) return;
+  var btn = document.createElement('button');
+  btn.id = 'ds-mail-btn';
+  btn.type = 'button';
+  btn.title = '选择邮件作为附件';
+  btn.setAttribute('aria-label', '选择邮件作为附件');
+  btn.innerHTML = ICON_MAIL;
+  if (parent && afterEl) parent.insertBefore(btn, afterEl.nextSibling);
+  else if (parent) parent.appendChild(btn);
+  else document.body.appendChild(btn);
+  btn.onclick = openMailPicker;
+}
+
+// 优先插到回形针右侧；反复重试，最后回退进 #pake-tools
+function tryPlaceMailButton(triesLeft) {
+  if (document.getElementById('ds-mail-btn')) return;
+  var anchor = findAttachButton();
+  if (anchor && anchor.parentElement) { createMailButton(anchor.parentElement, anchor); return; }
+  if (triesLeft > 0) { setTimeout(function () { tryPlaceMailButton(triesLeft - 1); }, 1500); return; }
+  var tools = document.getElementById('pake-tools') || document.body;
+  createMailButton(tools, null);
+}
+
+// 邮件 → Markdown（唯一一处转换实现）
+function mailToMarkdown(msg) {
+  var label = msg.mailbox;
+  for (var i = 0; i < MAIL_TABS.length; i++) { if (MAIL_TABS[i].key === msg.mailbox) label = MAIL_TABS[i].label; }
+  return '# ' + msg.subject + '\n\n'
+    + '- **发件人：** ' + msg.sender + '\n'
+    + '- **日期：** ' + msg.date + '\n'
+    + '- **邮箱：** ' + label + '\n\n'
+    + '---\n\n' + msg.body + '\n';
+}
+
+// 文件名清洗：去非法字符与控制字符、压缩空白、限长 60，空则 email
+function sanitizeFilename(name) {
+  var s = String(name || '').replace(/[\/\\:*?"<>|]/g, '').replace(/[\x00-\x1f\x7f]/g, '');
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length > 60) s = s.slice(0, 60);
+  return s || 'email';
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---------- 弹窗样式（内联注入） ----------
+function injectMailStyles() {
+  if (document.getElementById('ds-mail-style')) return;
+  var st = document.createElement('style');
+  st.id = 'ds-mail-style';
+  st.textContent = [
+    '#ds-mail-btn{display:inline-flex;align-items:center;justify-content:center;padding:6px;border:1px solid transparent;border-radius:8px;background:transparent;color:#0f1115;cursor:pointer;line-height:0}',
+    '#ds-mail-btn:hover{background:rgba(38,49,72,.06)}',
+    '#ds-mail-btn svg{width:18px;height:18px}',
+    '#ds-mail-overlay{position:fixed;inset:0;background:rgba(15,17,21,.45);z-index:2147483646;display:flex;align-items:center;justify-content:center}',
+    '.ds-mail-panel{width:560px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.25);overflow:hidden;font-size:14px;color:#0f1115}',
+    '.ds-mail-head{padding:14px 16px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.08)}',
+    '.ds-mail-tabs{display:flex;gap:6px;padding:10px 16px 0}',
+    '.ds-mail-tab{padding:6px 12px;border:1px solid rgba(0,0,0,.1);border-radius:999px;background:transparent;cursor:pointer;font-size:13px;color:#0f1115}',
+    '.ds-mail-tab.active{background:#3964fe;color:#fff;border-color:#3964fe}',
+    '.ds-mail-filter{margin:10px 16px;padding:8px 10px;border:1px solid rgba(0,0,0,.15);border-radius:8px;font-size:13px;outline:none}',
+    '.ds-mail-list{flex:1;overflow:auto;padding:0 8px 8px}',
+    '.ds-mail-row{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer}',
+    '.ds-mail-row:hover{background:rgba(38,49,72,.06)}',
+    '.ds-mail-row .ds-mail-date{color:#6b7280;font-size:12px;white-space:nowrap}',
+    '.ds-mail-row .ds-mail-sender{color:#374151;font-size:13px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.ds-mail-row .ds-mail-subj{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.ds-mail-status{padding:18px;text-align:center;color:#6b7280}',
+    '.ds-mail-more{margin:8px;padding:8px;width:calc(100% - 16px);border:1px solid rgba(0,0,0,.12);border-radius:8px;background:transparent;cursor:pointer}',
+    '.ds-mail-foot{display:flex;align-items:center;gap:10px;padding:12px 16px;border-top:1px solid rgba(0,0,0,.08)}',
+    '.ds-mail-foot button{padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#0f1115}',
+    '.ds-mail-foot .ds-mail-ok{background:#3964fe;border-color:#3964fe;color:#fff}',
+    '.ds-mail-foot .ds-mail-ok:disabled{opacity:.5;cursor:not-allowed}',
+    '.ds-mail-count{color:#6b7280;font-size:13px}',
+  ].join('\n');
+  document.head.appendChild(st);
+}
+
+// ---------- 弹窗 ----------
+function openMailPicker() {
+  if (document.getElementById('ds-mail-overlay')) return;
+  injectMailStyles();
+  var overlay = document.createElement('div');
+  overlay.id = 'ds-mail-overlay';
+  var tabsHtml = '';
+  for (var i = 0; i < MAIL_TABS.length; i++) {
+    tabsHtml += '<button class="ds-mail-tab" data-mb="' + MAIL_TABS[i].key + '">' + MAIL_TABS[i].label + '</button>';
+  }
+  overlay.innerHTML = '<div class="ds-mail-panel">'
+    + '<div class="ds-mail-head">选择邮件作为附件</div>'
+    + '<div class="ds-mail-tabs">' + tabsHtml + '</div>'
+    + '<input class="ds-mail-filter" type="text" placeholder="按发件人 / 主题过滤（仅已加载）">'
+    + '<div class="ds-mail-list"><div class="ds-mail-status">加载中…</div></div>'
+    + '<div class="ds-mail-foot"><span class="ds-mail-count">已选 0 封</span><span style="flex:1"></span>'
+    + '<button class="ds-mail-cancel">取消</button><button class="ds-mail-ok" disabled>确定</button></div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  var tabEls = overlay.querySelectorAll('.ds-mail-tab');
+  for (var t = 0; t < tabEls.length; t++) {
+    tabEls[t].onclick = (function (el) {
+      return function () { switchMailTab(el.getAttribute('data-mb')); };
+    })(tabEls[t]);
+  }
+  overlay.querySelector('.ds-mail-filter').oninput = function (e) {
+    mailState.filter = e.target.value || '';
+    renderMailList();
+  };
+  overlay.querySelector('.ds-mail-cancel').onclick = closeMailPicker;
+  overlay.querySelector('.ds-mail-ok').onclick = confirmMailPick;
+  overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) closeMailPicker(); });
+
+  updateMailTabs();
+  renderMailList();
+  mailLoadTab(mailState.tab, false);
+}
+
+function closeMailPicker() {
+  var o = document.getElementById('ds-mail-overlay');
+  if (o) o.remove();
+}
+
+function switchMailTab(mailbox) {
+  mailState.tab = mailbox;
+  updateMailTabs();
+  var st = mailState.lists[mailbox];
+  if (!st || (!st.messages.length && !st.loading && !st.error)) mailLoadTab(mailbox, false);
+  else renderMailList();
+}
+
+function updateMailTabs() {
+  var overlay = document.getElementById('ds-mail-overlay');
+  if (!overlay) return;
+  var tabEls = overlay.querySelectorAll('.ds-mail-tab');
+  for (var i = 0; i < tabEls.length; i++) {
+    var on = tabEls[i].getAttribute('data-mb') === mailState.tab;
+    tabEls[i].className = 'ds-mail-tab' + (on ? ' active' : '');
+  }
+}
+
+async function mailLoadTab(mailbox, more) {
+  var st = getMailList(mailbox);
+  if (st.loading) return;
+  st.loading = true;
+  st.error = null;
+  var limit = more ? Math.min(st.limit + MAIL_PAGE_STEP, MAIL_PAGE_MAX) : MAIL_PAGE_STEP;
+  renderMailList();
+  var r = await postToBridge({ mailbox: mailbox, limit: limit }, '/mails');
+  st.loading = false;
+  if (!r.ok) { st.error = (r.error && r.error.message) || String(r.error); renderMailList(); return; }
+  st.messages = r.messages || [];
+  st.limit = limit;
+  st.reachedEnd = st.messages.length < limit || limit >= MAIL_PAGE_MAX;
+  renderMailList();
+}
+
+function renderMailList() {
+  var overlay = document.getElementById('ds-mail-overlay');
+  if (!overlay) return;
+  var list = overlay.querySelector('.ds-mail-list');
+  var st = getMailList(mailState.tab);
+  var filter = mailState.filter.toLowerCase();
+
+  if (st.loading && !st.messages.length) { list.innerHTML = '<div class="ds-mail-status">加载中…</div>'; updateMailFooter(); return; }
+  if (st.error) { list.innerHTML = '<div class="ds-mail-status">加载失败：' + escapeHtml(st.error) + '</div>'; updateMailFooter(); return; }
+
+  var rows = [];
+  for (var i = 0; i < st.messages.length; i++) {
+    var m = st.messages[i];
+    var hay = (m.subject + ' ' + m.sender).toLowerCase();
+    if (filter && hay.indexOf(filter) === -1) continue;
+    rows.push(m);
+  }
+  if (!rows.length) {
+    list.innerHTML = '<div class="ds-mail-status">' + (st.messages.length ? '无匹配邮件' : '暂无邮件') + '</div>';
+  } else {
+    var html = '';
+    for (var j = 0; j < rows.length; j++) {
+      var msg = rows[j];
+      var key = mailKey(mailState.tab, msg.id);
+      var checked = mailState.selected.has(key) ? ' checked' : '';
+      var d = (msg.date || '').slice(0, 10);
+      html += '<label class="ds-mail-row">'
+        + '<input type="checkbox" class="ds-mail-cb" data-key="' + key + '"' + checked + '>'
+        + '<span class="ds-mail-date">' + escapeHtml(d) + '</span>'
+        + '<span class="ds-mail-sender">' + escapeHtml(msg.sender) + '</span>'
+        + '<span class="ds-mail-subj">' + escapeHtml(msg.subject) + '</span>'
+        + '</label>';
+    }
+    list.innerHTML = html;
+    var cbs = list.querySelectorAll('.ds-mail-cb');
+    for (var c = 0; c < cbs.length; c++) {
+      cbs[c].onchange = (function (el) {
+        return function () { toggleMailSelect(el.getAttribute('data-key'), el.checked); };
+      })(cbs[c]);
+    }
+    if (!st.reachedEnd) {
+      var more = document.createElement('button');
+      more.className = 'ds-mail-more';
+      more.textContent = st.loading ? '加载中…' : '加载更多';
+      more.onclick = function () { mailLoadTab(mailState.tab, true); };
+      list.appendChild(more);
+    }
+  }
+  updateMailFooter();
+}
+
+function toggleMailSelect(key, on) {
+  if (on) mailState.selected.add(key); else mailState.selected.delete(key);
+  updateMailFooter();
+}
+
+function updateMailFooter() {
+  var overlay = document.getElementById('ds-mail-overlay');
+  if (!overlay) return;
+  var n = mailState.selected.size;
+  overlay.querySelector('.ds-mail-count').textContent = '已选 ' + n + ' 封';
+  var ok = overlay.querySelector('.ds-mail-ok');
+  ok.disabled = n === 0;
+  ok.textContent = n > 0 ? ('确定（附加 ' + n + ' 封）') : '确定';
+}
+
+async function confirmMailPick() {
+  var keys = [];
+  mailState.selected.forEach(function (k) { keys.push(k); });
+  if (!keys.length) return;
+  var okBtn = document.querySelector('.ds-mail-ok');
+  if (okBtn) { okBtn.disabled = true; okBtn.textContent = '获取正文…'; }
+  var files = [];
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var sep = key.lastIndexOf(':');
+    var mailbox = key.slice(0, sep);
+    var id = Number(key.slice(sep + 1));
+    var r = await postToBridge({ mailbox: mailbox, id: id }, '/mail');
+    if (!r.ok || !r.message) {
+      showTip('✗ 取邮件正文失败', '#ef4444');
+      if (okBtn) { okBtn.disabled = false; updateMailFooter(); }
+      return;
+    }
+    var msg = r.message;
+    var md = mailToMarkdown(msg);
+    var fname = (msg.date || '').slice(0, 10) + '-' + sanitizeFilename(msg.subject) + '.md';
+    files.push(new File([md], fname, { type: 'text/markdown' }));
+  }
+  closeMailPicker();
+  attachMails(files);
+}
+
+// ---------- 附件注入 ----------
+function attachMails(files) {
+  if (!files.length) return;
+  var input = findFileInput();
+  if (input && typeof DataTransfer !== 'undefined') {
+    try {
+      if (input.multiple === false && files.length > 1) {
+        for (var i = 0; i < files.length; i++) {
+          var dt1 = new DataTransfer();
+          dt1.items.add(files[i]);
+          input.files = dt1.files;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        showTip('已附加（逐封依次注入）', DS_BLUE);
+        return;
+      }
+      var dt = new DataTransfer();
+      if (input.files) { for (var j = 0; j < input.files.length; j++) { dt.items.add(input.files[j]); } }
+      for (var k = 0; k < files.length; k++) { dt.items.add(files[k]); }
+      input.files = dt.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      showTip('已附加 ' + files.length + ' 封邮件', DS_BLUE);
+      return;
+    } catch (e) { /* 落到文本兜底 */ }
+  }
+  insertMailsAsText(files);
+}
+
+function insertMailsAsText(files) {
+  var composer = findComposer();
+  if (!composer) { showTip('✗ 找不到输入框，无法插入', '#ef4444'); return; }
+  Promise.all(files.map(function (f) { return f.text(); })).then(function (texts) {
+    var text = texts.join('\n\n---\n\n');
+    if (composer.tagName === 'TEXTAREA') {
+      composer.value = (composer.value ? composer.value + '\n\n' : '') + text;
+    } else {
+      composer.textContent = (composer.textContent ? composer.textContent + '\n\n' : '') + text;
+    }
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    showTip('已插入为文本', DS_BLUE);
+  });
+}
+
+// ---------- 诊断上报（失败静默，不影响主流程） ----------
+function mailProbe() {
+  try {
+    var attach = findAttachButton();
+    var fileInput = findFileInput();
+    var composer = findComposer();
+    postToBridge({
+      attachButton: !!attach,
+      attachLabel: attach ? (attach.getAttribute('aria-label') || attach.className || '') : null,
+      fileInput: !!fileInput,
+      composer: !!composer,
+      href: location.href,
+    }, '/probe');
+  } catch (e) { /* 静默 */ }
+}
+
 // ========== 初始化 ==========
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', addButtons);
-} else {
+function initDsbridge() {
   addButtons();
+  tryPlaceMailButton(20);
+  setTimeout(mailProbe, 4000);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initDsbridge);
+} else {
+  initDsbridge();
 }
