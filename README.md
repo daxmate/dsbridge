@@ -43,8 +43,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| `bridge.js` | Node 本地桥：接收对话，写入 jsonl（HTTPS 8787 主 / HTTP 8786 备用） |
-| `deepseek_inject.js` | Pake 注入脚本：自动同步 + 同步/导出/复制按钮（SVG 图标） |
+| `bridge.js` | Node 本地桥：接收对话，写入 jsonl（HTTPS 8787 主 / HTTP 8786 备用）；另提供 `/mails`、`/mail` 邮件接口（Apple Mail，只读） |
+| `deepseek_inject.js` | Pake 注入脚本：自动同步 + 同步/导出/复制按钮（SVG 图标）+ 邮件附件按钮 |
 | `pack_deepseek.sh` | 一键打包脚本：unset CC/CXX → 生成/信任证书 → 安装服务 → 打包 |
 | `com.dax.dsbridge.plist` | launchd 服务模板（`__DSBRIDGE_DIR__` 占位符，安装时替换） |
 | `cert.pem` / `key.pem` | 自签证书（**不入库**，首次由脚本生成） |
@@ -95,7 +95,27 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
   - **同步到本地**：立即保存当前对话
   - **导出**：下载 Markdown 文件
   - **复制全部**：复制对话到剪贴板
+  - **邮件附件**：从本机 Apple Mail（仅 Senkori 账号）挑一封或多封邮件作为附件
 - 对 OpenClaw 说："读一下我今天的 DeepSeek 对话" / "接着我和 DeepSeek 聊的 XX 话题继续"
+
+## 邮件附件
+
+在 DeepSeek 输入框工具栏的"添加附件（回形针）"按钮旁新增**邮件按钮**：点开从本机 **Apple Mail** 的 **Senkori** 账号里挑邮件，作为附件传给 DeepSeek。
+
+- **文件夹**：收件箱（INBOX）/ 归档（Archive）/ 已发送（Sent Messages）；排除 Junk/Deleted/Drafts/Starred
+- **多选**：可多选，选 N 封生成 N 个独立 `.md` 附件
+- **内容**：主题 + 发件人 + 日期 + 纯文本正文；**不含原始附件**；正文超过 20000 字符时保留头部、砍掉尾部（旧的）
+- **免登录**：经本地桥 `osascript` 调 Apple Mail，无需登录；仅 Senkori 账号
+
+### 邮件接口（bridge.js 新增，协议只增不改）
+
+| 接口 | 请求体 | 返回 |
+|---|---|---|
+| `POST /mails` | `{ mailbox, limit? }`（mailbox 取 INBOX / Archive / Sent Messages；limit 默认 20，上限 50） | `{ ok, mailbox, messages: [{ id, subject, sender, date, mailbox }] }` |
+| `POST /mail` | `{ mailbox, id }` | `{ ok, message: { id, subject, sender, date, mailbox, body } }`（body 为纯文本，截断到 20000 字符） |
+| `POST /probe` | 注入脚本上报的 DOM 探测信息 | `{ ok }`（仅写 bridge.log） |
+
+失败返回 `{ ok: false, error: "..." }`（HTTP 200，与既有风格一致）。
 
 ## 数据格式
 
