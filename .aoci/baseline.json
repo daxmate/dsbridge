@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "created_at": "2026-10-13T05:04:02Z",
+  "updated_at": "2026-10-13T05:04:02Z",
+  "files": {
+    ".gitignore": {
+      "sha256": "0ea9a990dbf4eb245b7f10ba91f5bd0b497432b707a8de2ad89f7349221418e1",
+      "size": 188,
+      "normalized_sha256": "0ea9a990dbf4eb245b7f10ba91f5bd0b497432b707a8de2ad89f7349221418e1"
+    },
+    "README.md": {
+      "sha256": "9c9e146d5b9d3c15a4b2c4d438477ddd35e2da68dab4bdf0105e4d2fb4d016e1",
+      "size": 5300,
+      "normalized_sha256": "9c9e146d5b9d3c15a4b2c4d438477ddd35e2da68dab4bdf0105e4d2fb4d016e1"
+    },
+    "aoci.code.txt": {
+      "sha256": "c646617de94c0d0f1618ad5945d8ae01dd1268fcd0fcded95fd0535bc29b2a8b",
+      "size": 2810,
+      "normalized_sha256": "c646617de94c0d0f1618ad5945d8ae01dd1268fcd0fcded95fd0535bc29b2a8b"
+    },
+    "bridge.js": {
+      "sha256": "3a2becf0d9c18c8904e3de87066f06e0442e3ffd4f3121b1ef214856bcc22195",
+      "size": 5215,
+      "normalized_sha256": "3a2becf0d9c18c8904e3de87066f06e0442e3ffd4f3121b1ef214856bcc22195"
+    },
+    "com.dax.dsbridge.plist": {
+      "sha256": "47117deeba38f93bb268c4677354bb71f4be1e16fbbdea7872fde35bce3bd562",
+      "size": 777,
+      "normalized_sha256": "47117deeba38f93bb268c4677354bb71f4be1e16fbbdea7872fde35bce3bd562"
+    },
+    "deepseek_inject.js": {
+      "sha256": "fc04bed70dc2b0b0c9e648e35c2d9c5a9f692baadf7c9880ee6d5966cede5fcc",
+      "size": 10183,
+      "normalized_sha256": "fc04bed70dc2b0b0c9e648e35c2d9c5a9f692baadf7c9880ee6d5966cede5fcc"
+    },
+    "pack_deepseek.sh": {
+      "sha256": "1930cf37b5c0969c8f55659176ed7fbd32b07b2e59808c4cf69cf26abbe26f6d",
+      "size": 3775,
+      "normalized_sha256": "1930cf37b5c0969c8f55659176ed7fbd32b07b2e59808c4cf69cf26abbe26f6d"
+    },
+    "package.json": {
+      "sha256": "70c8c010f49d5cb51e7608afb1c727778667edd395c239ea9bd75b2812f67034",
+      "size": 308,
+      "normalized_sha256": "70c8c010f49d5cb51e7608afb1c727778667edd395c239ea9bd75b2812f67034"
+    }
+  }
+}

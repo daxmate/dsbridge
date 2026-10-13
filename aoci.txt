@@ -1,0 +1,7 @@
+#AOCI-ROOT-MANIFEST: 1
+#Format-Version: cognition-volumes/v1
+#Locale: zh-CN
+#Project: dsbridge
+#Global-Invariants: 仅本机回环通信；cert.pem/key.pem 与 data/ 为私密产物不入库；注入脚本与本地桥的 HTTP 协议字段只增不改
+#Volume: id=meta kind=meta path=aoci.meta.txt format=meta-v1 depends=- state=enabled
+#Volume: id=code kind=code path=aoci.code.txt format=object-fras-v2 depends=meta state=enabled

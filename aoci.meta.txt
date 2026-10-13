@@ -1,0 +1,16 @@
+#AOCI-META-VOLUME: 1
+#Object-Protocol: repository-cognition-object/v2
+#FRAS-Discipline: 2
+#FRAS-v2-Limits-Authority: machine-contract
+#S-Admission: non-inferable-and-error-preventing
+#Object-Kinds: code=file database=table
+#[Tag dictionary: code]
+#A Layer: C-共享基础 E-入口边界 A-应用编排 D-领域逻辑 M-中间件 P-持久化 I-集成适配 R-运行基础 L-库与SDK F-声明配置 O-运维交付 S-文档规范 Z-其他
+#B Module: G-跨域通用 U-用户交互 B-核心业务 D-数据状态 N-网络协议 M-消息事件 S-安全隐私 C-配置策略 O-可观测性 R-可靠性恢复 H-硬件设备 V-构建发布 Z-其他
+#C Importance: 9-最高 8-很高 7-高 6-较高 5-中等 4-较低 3-低
+#E Scale: L-大>400 M-中200-400 S-小100-200 T-微<100
+#[Tag dictionary: database]
+#A Layer: D-数据库
+#B Module: S-模式
+#C Importance: 9-最高 8-很高 7-高 5-中等 3-低
+#E Scale: L-大>400 M-中200-400 S-小100-200 T-微<100
