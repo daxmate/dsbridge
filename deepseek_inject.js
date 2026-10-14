@@ -289,7 +289,7 @@ const MAIL_TABS = [
 ];
 const MAIL_PAGE_STEP = 20;
 const MAIL_PAGE_MAX = 50;
-const MAIL_FETCH_TIMEOUT_MS = 45000; // /mails 请求超时上限（含 Mail 拉起等待）
+const MAIL_FETCH_TIMEOUT_MS = 90000; // /mails 请求超时上限：> 服务端 osascript(30s) + Mail 就绪等待(45s)，保证前端晚于服务端拿到结果
 
 const mailState = {
   tab: 'INBOX',

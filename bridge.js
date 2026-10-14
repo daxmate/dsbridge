@@ -240,18 +240,27 @@ function refreshMailBoxInBackground(mailbox, limit) {
 }
 
 // 列出某邮箱最近 limit 封（messages 1 thru N 即最新在前，已实测）
+// 性能：一次性解析消息列表（messages 1 thru lim）再逐条取属性，避免每条重复做邮箱查找；
+//       Mail 不支持对「消息列表」做属性批取（id/subject of 列表 报 -1728），故逐条取属性。
 function buildListScript(mailbox, limit) {
   return `tell application "Mail"
 	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
 	set lim to ${limit}
+	try
+		set msgs to messages 1 thru lim of mb
+	on error
+		set msgs to {}
+		set cnt to count of messages of mb
+		if cnt > lim then set cnt to lim
+		repeat with i from 1 to cnt
+			set end of msgs to message i of mb
+		end repeat
+	end try
 	set out to ""
-	repeat with i from 1 to lim
-		try
-			set m to message i of mb
-			set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
-		on error
-			exit repeat
-		end try
+	set n to count of msgs
+	repeat with k from 1 to n
+		set m to item k of msgs
+		set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
 	end repeat
 	return out
 end tell
