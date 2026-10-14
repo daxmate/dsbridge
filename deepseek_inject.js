@@ -106,22 +106,34 @@ let autoSyncEnabled = true;
 
 function messageKey(m, i) { return i; }
 
-async function postToBridge(messages, endpoint = '/append') {
+async function postToBridge(messages, endpoint = '/append', options) {
   const urls = [DSBRIDGE_URL, ...DSBRIDGE_FALLBACK_URLS];
+  const opts = options || {};
   let lastErr = null;
-  for (const url of urls) {
-    try {
-      const res = await fetch(`${url}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(messages),
-      });
-      const result = await res.json();
-      if (result.ok) return { ok: true, ...result };
-      lastErr = new Error(`HTTP ${res.status}: ${result.error || res.statusText}`);
-    } catch (e) {
-      lastErr = e;
+  let controller = null;
+  let timer = null;
+  if (opts.timeoutMs) {
+    controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  }
+  try {
+    for (const url of urls) {
+      try {
+        const res = await fetch(`${url}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(messages),
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+        const result = await res.json();
+        if (result.ok) return { ok: true, ...result };
+        lastErr = new Error(`HTTP ${res.status}: ${result.error || res.statusText}`);
+      } catch (e) {
+        lastErr = e;
+      }
     }
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   return { ok: false, error: lastErr };
 }
@@ -277,6 +289,7 @@ const MAIL_TABS = [
 ];
 const MAIL_PAGE_STEP = 20;
 const MAIL_PAGE_MAX = 50;
+const MAIL_FETCH_TIMEOUT_MS = 45000; // /mails 请求超时上限（含 Mail 拉起等待）
 
 const mailState = {
   tab: 'INBOX',
@@ -319,28 +332,43 @@ function findComposer() {
   return document.querySelector('div[contenteditable="true"]') || document.querySelector('textarea');
 }
 
-function createMailButton(parent, afterEl) {
-  if (document.getElementById('ds-mail-btn')) return;
+function createMailButton() {
+  var existing = document.getElementById('ds-mail-btn');
+  if (existing) return existing;
   var btn = document.createElement('button');
   btn.id = 'ds-mail-btn';
   btn.type = 'button';
   btn.title = '选择邮件作为附件';
   btn.setAttribute('aria-label', '选择邮件作为附件');
   btn.innerHTML = ICON_MAIL;
-  if (parent && afterEl) parent.insertBefore(btn, afterEl.nextSibling);
-  else if (parent) parent.appendChild(btn);
-  else document.body.appendChild(btn);
   btn.onclick = openMailPicker;
+  return btn;
 }
 
-// 优先插到回形针右侧；反复重试，最后回退进 #pake-tools
-function tryPlaceMailButton(triesLeft) {
-  if (document.getElementById('ds-mail-btn')) return;
-  var anchor = findAttachButton();
-  if (anchor && anchor.parentElement) { createMailButton(anchor.parentElement, anchor); return; }
-  if (triesLeft > 0) { setTimeout(function () { tryPlaceMailButton(triesLeft - 1); }, 1500); return; }
+// 把按钮挂到指定容器（afterEl 之后）；已存在则移动到目标位置
+function mountMailButton(root, afterEl) {
+  var btn = createMailButton();
+  if (afterEl && afterEl.parentElement === root && afterEl.nextSibling !== btn) {
+    root.insertBefore(btn, afterEl.nextSibling);
+  } else if (root && btn.parentElement !== root) {
+    root.appendChild(btn);
+  } else if (!root && btn.parentElement !== document.body) {
+    document.body.appendChild(btn);
+  }
+  return btn;
+}
+
+// ① 立即渲染：先挂 #pake-tools（找不到回退 body）——禁止「找不到锚点就不渲染」
+function renderMailButtonImmediately() {
   var tools = document.getElementById('pake-tools') || document.body;
-  createMailButton(tools, null);
+  mountMailButton(tools, null);
+}
+
+// ② 随后尝试移到回形针右侧（找到 attach 锚点才移动；找不到就保持已渲染位置）
+function tryPlaceMailButton(triesLeft) {
+  var anchor = findAttachButton();
+  if (anchor && anchor.parentElement) { mountMailButton(anchor.parentElement, anchor); return; }
+  if (triesLeft > 0) { setTimeout(function () { tryPlaceMailButton(triesLeft - 1); }, 1500); return; }
 }
 
 // 邮件 → Markdown（唯一一处转换实现）
@@ -395,6 +423,8 @@ function injectMailStyles() {
     '.ds-mail-foot button{padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#0f1115}',
     '.ds-mail-foot .ds-mail-ok{background:#3964fe;border-color:#3964fe;color:#fff}',
     '.ds-mail-foot .ds-mail-ok:disabled{opacity:.5;cursor:not-allowed}',
+    '.ds-mail-foot .ds-mail-refresh{background:transparent;color:#0f1115}',
+    '.ds-mail-foot .ds-mail-refresh:disabled{opacity:.6;cursor:default}',
     '.ds-mail-count{color:#6b7280;font-size:13px}',
   ].join('\n');
   document.head.appendChild(st);
@@ -415,7 +445,8 @@ function openMailPicker() {
     + '<div class="ds-mail-tabs">' + tabsHtml + '</div>'
     + '<input class="ds-mail-filter" type="text" placeholder="按发件人 / 主题过滤（仅已加载）">'
     + '<div class="ds-mail-list"><div class="ds-mail-status">加载中…</div></div>'
-    + '<div class="ds-mail-foot"><span class="ds-mail-count">已选 0 封</span><span style="flex:1"></span>'
+    + '<div class="ds-mail-foot"><span class="ds-mail-count">已选 0 封</span>'
+    + '<button class="ds-mail-refresh" type="button">刷新</button><span style="flex:1"></span>'
     + '<button class="ds-mail-cancel">取消</button><button class="ds-mail-ok" disabled>确定</button></div>'
     + '</div>';
   document.body.appendChild(overlay);
@@ -432,6 +463,7 @@ function openMailPicker() {
   };
   overlay.querySelector('.ds-mail-cancel').onclick = closeMailPicker;
   overlay.querySelector('.ds-mail-ok').onclick = confirmMailPick;
+  overlay.querySelector('.ds-mail-refresh').onclick = refreshMailTab;
   overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) closeMailPicker(); });
 
   updateMailTabs();
@@ -440,6 +472,7 @@ function openMailPicker() {
 }
 
 function closeMailPicker() {
+  clearMailSlowHint();
   var o = document.getElementById('ds-mail-overlay');
   if (o) o.remove();
 }
@@ -448,7 +481,7 @@ function switchMailTab(mailbox) {
   mailState.tab = mailbox;
   updateMailTabs();
   var st = mailState.lists[mailbox];
-  if (!st || (!st.messages.length && !st.loading && !st.error)) mailLoadTab(mailbox, false);
+  if (!st || (!st.messages.length && !st.loading)) mailLoadTab(mailbox, false);
   else renderMailList();
 }
 
@@ -462,20 +495,61 @@ function updateMailTabs() {
   }
 }
 
-async function mailLoadTab(mailbox, more) {
+// 慢加载提示：>3s 仍无数据时把「加载中…」换成更具体的文案
+var mailSlowTimer = null;
+function clearMailSlowHint() {
+  if (mailSlowTimer) { clearTimeout(mailSlowTimer); mailSlowTimer = null; }
+}
+function startMailSlowHint(mailbox) {
+  clearMailSlowHint();
+  mailSlowTimer = setTimeout(function () {
+    mailSlowTimer = null;
+    if (mailState.tab !== mailbox) return;
+    var list = document.querySelector('#ds-mail-overlay .ds-mail-list');
+    var st = mailState.lists[mailbox];
+    if (list && st && st.loading && !st.messages.length) {
+      list.innerHTML = '<div class="ds-mail-status">正在启动 Mail，首次可能较慢，请稍候…</div>';
+    }
+  }, 3000);
+}
+
+// 底部刷新按钮：以 refresh:true 重载当前 tab（绕过缓存）
+function refreshMailTab() {
+  var st = getMailList(mailState.tab);
+  if (st.loading) return;
+  mailLoadTab(mailState.tab, false, { refresh: true });
+}
+
+async function mailLoadTab(mailbox, more, opts) {
   var st = getMailList(mailbox);
   if (st.loading) return;
+  var refresh = !!(opts && opts.refresh);
   st.loading = true;
   st.error = null;
   var limit = more ? Math.min(st.limit + MAIL_PAGE_STEP, MAIL_PAGE_MAX) : MAIL_PAGE_STEP;
   renderMailList();
-  var r = await postToBridge({ mailbox: mailbox, limit: limit }, '/mails');
-  st.loading = false;
-  if (!r.ok) { st.error = (r.error && r.error.message) || String(r.error); renderMailList(); return; }
-  st.messages = r.messages || [];
-  st.limit = limit;
-  st.reachedEnd = st.messages.length < limit || limit >= MAIL_PAGE_MAX;
-  renderMailList();
+  startMailSlowHint(mailbox);
+  try {
+    var r = await postToBridge({ mailbox: mailbox, limit: limit, refresh: refresh }, '/mails', { timeoutMs: MAIL_FETCH_TIMEOUT_MS });
+    if (!r.ok) {
+      var msg = (r.error && r.error.message) ? r.error.message : String(r.error);
+      if ((r.error && r.error.name === 'AbortError') || /abort/i.test(msg) || /timeout/i.test(msg)) {
+        st.error = '请求超时，请点刷新重试';
+      } else if (/mail-not-ready/.test(msg)) {
+        st.error = 'Mail 未能就绪，请点重试';
+      } else {
+        st.error = msg;
+      }
+      return;
+    }
+    st.messages = r.messages || [];
+    st.limit = limit;
+    st.reachedEnd = st.messages.length < limit || limit >= MAIL_PAGE_MAX;
+  } finally {
+    st.loading = false;
+    clearMailSlowHint();
+    renderMailList();
+  }
 }
 
 function renderMailList() {
@@ -542,6 +616,12 @@ function updateMailFooter() {
   var ok = overlay.querySelector('.ds-mail-ok');
   ok.disabled = n === 0;
   ok.textContent = n > 0 ? ('确定（附加 ' + n + ' 封）') : '确定';
+  var st = getMailList(mailState.tab);
+  var refresh = overlay.querySelector('.ds-mail-refresh');
+  if (refresh) {
+    if (st.loading) { refresh.disabled = true; refresh.textContent = '刷新中…'; }
+    else { refresh.disabled = false; refresh.textContent = st.error ? '重试' : '刷新'; }
+  }
 }
 
 async function confirmMailPick() {
@@ -635,7 +715,8 @@ function mailProbe() {
 // ========== 初始化 ==========
 function initDsbridge() {
   addButtons();
-  tryPlaceMailButton(20);
+  renderMailButtonImmediately(); // 邮件按钮先渲染（不等锚点）
+  tryPlaceMailButton(20);        // 随后再尝试移到回形针右侧
   setTimeout(mailProbe, 4000);
 }
 
