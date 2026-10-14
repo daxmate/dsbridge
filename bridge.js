@@ -401,11 +401,16 @@ function handleRequest(req, res) {
       try {
         const parsed = JSON.parse(data);
         let result;
+        const t0 = Date.now();
         if (pathname === '/open-url') result = handleOpenUrl(parsed);
         else if (pathname === '/append') result = handleAppend(parsed);
         else if (pathname === '/mails') result = await handleMails(parsed);
         else if (pathname === '/mail') result = await handleMail(parsed);
         else result = handleProbe(parsed);
+        // 诊断日志：仅 /mails、/mail（定位「app 到不了桥 / 结果与耗时」）；不改协议与返回
+        if (pathname === '/mails' || pathname === '/mail') {
+          console.log('[dsbridge][req]', pathname, JSON.stringify(parsed), result && result.ok ? (result.cached ? (result.stale ? 'cached(stale)' : 'cached') : 'ok') : ('error:' + ((result && result.error) || 'unknown')), (Date.now() - t0) + 'ms');
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {

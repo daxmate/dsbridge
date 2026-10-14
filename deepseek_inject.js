@@ -28,6 +28,165 @@ const ICON_EXTERNAL = `<svg ${ICON_COMMON}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2
 // 邮件：信封
 const ICON_MAIL = `<svg ${ICON_COMMON}><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>`;
 
+// ========== 注入 UI 主题（浅/深）自适应 ==========
+// 目标：4 个工具按钮、邮件按钮、「选择邮件」弹窗（含筛选输入框）跟随 DeepSeek
+//       页面实际主题（不只系统）变色；页面切主题时实时跟随。
+// 实现：单一切换点 dsApplyTheme() —— 读当前主题 -> 给注入根元素加/去 'ds-dark' 类；
+//       两套调色板只在 DS_THEME_STYLE_TEXT 里定义一处（其余样式只引用 var(--ds-*)）。
+
+// ---- 纯判定（无 DOM 依赖，可被 node 直接单测）----
+// 解析 CSS 颜色字符串 -> [r,g,b]；全透明 / 无法识别 -> null
+function dsParseColor(value) {
+  if (typeof value !== 'string') return null;
+  var s = value.trim();
+  var m = s.match(/^rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)(?:\s*[,/]\s*([0-9.]+))?\s*\)$/i);
+  if (m) {
+    if (m[4] !== undefined && Number(m[4]) === 0) return null; // 全透明 = 未设色
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+  m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) {
+    var h = m[1];
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  return null;
+}
+
+// 相对亮度（0=黑，1=白），WCAG 相对亮度公式
+function dsRelLuminance(rgb) {
+  var c = rgb.map(function (v) {
+    v = v / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+// DOM 主题信号（类名 / data-theme / color-scheme）-> 'dark' | 'light' | null
+// 只认「明确且不矛盾」的信号（如 color-scheme: 'light dark' 视为无结论）
+function dsThemeSignal(className, dataTheme, colorScheme) {
+  var cls = String(className || '').toLowerCase();
+  var dt = String(dataTheme || '').toLowerCase();
+  var cs = String(colorScheme || '').toLowerCase();
+  var hasDark = /(^|\s)dark(\s|$)/.test(cls) || dt === 'dark' || /(^|\s)dark(\s|$)/.test(cs);
+  var hasLight = /(^|\s)light(\s|$)/.test(cls) || dt === 'light' || /(^|\s)light(\s|$)/.test(cs);
+  if (hasDark && !hasLight) return 'dark';
+  if (hasLight && !hasDark) return 'light';
+  return null;
+}
+
+// 纯判定：按优先级 (a) DOM 信号 -> (b) 背景色相对亮度 -> (c) prefers-color-scheme
+// input: { className, dataTheme, colorScheme, bgColor, prefersDark }
+function dsResolveDark(input) {
+  input = input || {};
+  var signal = dsThemeSignal(input.className, input.dataTheme, input.colorScheme);
+  if (signal === 'dark') return true;
+  if (signal === 'light') return false;
+  var rgb = dsParseColor(input.bgColor);
+  if (rgb) return dsRelLuminance(rgb) < 0.5; // 兜底主力：不依赖任何类名/变量名
+  return !!input.prefersDark;
+}
+
+// ---- 调色板（唯一一处定义：浅色默认 / .ds-dark 覆盖深色）----
+// 能引 DeepSeek 页面变量 --dsw-alias-* 就引（均带自研回退，缺变量也不脆）。
+var DS_THEME_STYLE_TEXT = `
+#pake-tools, #ds-mail-btn, #ds-mail-overlay {
+  color-scheme: light;
+  --ds-fg: var(--dsw-alias-label-primary, #0f1115);
+  --ds-fg-mid: var(--dsw-alias-label-secondary, #374151);
+  --ds-fg-dim: var(--dsw-alias-label-tertiary, #6b7280);
+  --ds-border: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  --ds-hover: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  --ds-active: rgba(38, 49, 72, 0.1);
+  --ds-panel: var(--dsw-alias-bg-base, #ffffff);
+  --ds-panel-border: rgba(0, 0, 0, 0.08);
+  --ds-overlay: rgba(15, 17, 21, 0.45);
+  --ds-input-bg: var(--dsw-alias-bg-base, #ffffff);
+  --ds-input-border: rgba(0, 0, 0, 0.15);
+  --ds-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+#pake-tools.ds-dark, #ds-mail-btn.ds-dark, #ds-mail-overlay.ds-dark {
+  color-scheme: dark;
+  --ds-fg: var(--dsw-alias-label-primary, #e6e6e6);
+  --ds-fg-mid: var(--dsw-alias-label-secondary, #c2c7cf);
+  --ds-fg-dim: var(--dsw-alias-label-tertiary, #9aa0a6);
+  --ds-border: var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16));
+  --ds-hover: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08));
+  --ds-active: rgba(255, 255, 255, 0.14);
+  --ds-panel: var(--dsw-alias-bg-base, #1f2023);
+  --ds-panel-border: rgba(255, 255, 255, 0.1);
+  --ds-overlay: rgba(0, 0, 0, 0.6);
+  --ds-input-bg: var(--dsw-alias-bg-base, #2a2b2f);
+  --ds-input-border: rgba(255, 255, 255, 0.2);
+  --ds-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+`;
+
+// 注入调色板样式（幂等）
+function dsInjectThemeStyle() {
+  if (document.getElementById('ds-theme-style')) return;
+  var st = document.createElement('style');
+  st.id = 'ds-theme-style';
+  st.textContent = DS_THEME_STYLE_TEXT;
+  document.head.appendChild(st);
+}
+
+// 参与切换的注入根元素（其内部元素经 CSS 变量继承）
+function dsInjectedRoots() {
+  return ['pake-tools', 'ds-mail-btn', 'ds-mail-overlay']
+    .map(function (id) { return document.getElementById(id); })
+    .filter(Boolean);
+}
+
+// 读当前页面主题环境（供上面的纯判定函数消费）
+function dsReadThemeEnv() {
+  var root = document.documentElement;
+  var bodyBg = '';
+  var htmlBg = '';
+  var scheme = '';
+  try { if (document.body) bodyBg = getComputedStyle(document.body).backgroundColor; } catch (e) { /* 忽略 */ }
+  try { htmlBg = getComputedStyle(root).backgroundColor; } catch (e) { /* 忽略 */ }
+  try { scheme = getComputedStyle(root).colorScheme || ''; } catch (e) { /* 忽略 */ }
+  return {
+    className: (root ? root.className : '') + ' ' + (document.body ? document.body.className : ''),
+    dataTheme: (root && root.getAttribute('data-theme')) || '',
+    colorScheme: scheme,
+    bgColor: dsParseColor(bodyBg) ? bodyBg : htmlBg,
+    prefersDark: !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches),
+  };
+}
+
+// 单一切换点：算主题 -> 给所有注入根元素加/去 'ds-dark'
+function dsApplyTheme() {
+  dsInjectThemeStyle();
+  var dark = dsResolveDark(dsReadThemeEnv());
+  var els = dsInjectedRoots();
+  for (var i = 0; i < els.length; i++) {
+    if (dark) els[i].classList.add('ds-dark');
+    else els[i].classList.remove('ds-dark');
+  }
+  return dark;
+}
+
+// 实时跟随：观察 html/body 的 class/style/data-theme + 监听系统主题变化
+var dsThemeObserver = null;
+var dsThemeMedia = null;
+function dsWatchTheme() {
+  if (typeof MutationObserver !== 'undefined' && !dsThemeObserver) {
+    dsThemeObserver = new MutationObserver(function () { dsApplyTheme(); });
+    dsThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    if (document.body) {
+      dsThemeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    }
+  }
+  if (window.matchMedia && !dsThemeMedia) {
+    dsThemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+    var onChange = function () { dsApplyTheme(); };
+    if (dsThemeMedia.addEventListener) dsThemeMedia.addEventListener('change', onChange);
+    else if (dsThemeMedia.addListener) dsThemeMedia.addListener(onChange);
+  }
+}
+
 // ========== 添加功能按钮 ==========
 function addButtons() {
   const container = document.createElement('div');
@@ -63,10 +222,10 @@ function addButtons() {
       gap: 6px;
       height: 36px;
       padding: 0 14px;
-      border: 1px solid rgba(0, 0, 0, 0.1);
+      border: 1px solid var(--ds-border);
       border-radius: 999px;
       background: transparent;
-      color: #0f1115;
+      color: var(--ds-fg);
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
@@ -78,10 +237,10 @@ function addButtons() {
       flex-shrink: 0;
     }
     #pake-tools button:hover {
-      background: rgba(38, 49, 72, 0.06);
+      background: var(--ds-hover);
     }
     #pake-tools button:active {
-      background: rgba(38, 49, 72, 0.1);
+      background: var(--ds-active);
     }
     /* 打印相关样式已移除：方案 B 走本地桥生成打印页，不再依赖页面内 @media print */
   `;
@@ -93,6 +252,8 @@ function addButtons() {
   document.getElementById('pake-export').onclick = exportConversation;
   document.getElementById('pake-copy').onclick = copyAll;
   document.getElementById('pake-open').onclick = openInBrowser;
+
+  dsApplyTheme(); // 首次上色（页面主题可能已是深色）
 }
 
 // ========== 自动同步 ==========
@@ -184,7 +345,10 @@ function autoSyncTick() {
   }
 }
 
-setInterval(autoSyncTick, AUTO_SYNC_INTERVAL_MS);
+// 仅在浏览器（注入）环境启动轮询；node 直接 require 本文件做单测时跳过
+if (typeof window !== 'undefined') {
+  setInterval(autoSyncTick, AUTO_SYNC_INTERVAL_MS);
+}
 
 // ========== 同步到本地桥（手动按钮） ==========
 async function syncToBridge() {
@@ -355,6 +519,7 @@ function mountMailButton(root, afterEl) {
   } else if (!root && btn.parentElement !== document.body) {
     document.body.appendChild(btn);
   }
+  dsApplyTheme(); // 邮件按钮创建/移动后按当前主题上色
   return btn;
 }
 
@@ -401,31 +566,32 @@ function injectMailStyles() {
   var st = document.createElement('style');
   st.id = 'ds-mail-style';
   st.textContent = [
-    '#ds-mail-btn{display:inline-flex;align-items:center;justify-content:center;padding:6px;border:1px solid transparent;border-radius:8px;background:transparent;color:#0f1115;cursor:pointer;line-height:0}',
-    '#ds-mail-btn:hover{background:rgba(38,49,72,.06)}',
+    '#ds-mail-btn{display:inline-flex;align-items:center;justify-content:center;padding:6px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--ds-fg);cursor:pointer;line-height:0}',
+    '#ds-mail-btn:hover{background:var(--ds-hover)}',
     '#ds-mail-btn svg{width:18px;height:18px}',
-    '#ds-mail-overlay{position:fixed;inset:0;background:rgba(15,17,21,.45);z-index:2147483646;display:flex;align-items:center;justify-content:center}',
-    '.ds-mail-panel{width:560px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;background:#fff;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.25);overflow:hidden;font-size:14px;color:#0f1115}',
-    '.ds-mail-head{padding:14px 16px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.08)}',
+    '#ds-mail-overlay{position:fixed;inset:0;background:var(--ds-overlay);z-index:2147483646;display:flex;align-items:center;justify-content:center}',
+    '.ds-mail-panel{width:560px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;background:var(--ds-panel);border-radius:12px;box-shadow:var(--ds-shadow);overflow:hidden;font-size:14px;color:var(--ds-fg)}',
+    '.ds-mail-head{padding:14px 16px;font-weight:600;border-bottom:1px solid var(--ds-panel-border)}',
     '.ds-mail-tabs{display:flex;gap:6px;padding:10px 16px 0}',
-    '.ds-mail-tab{padding:6px 12px;border:1px solid rgba(0,0,0,.1);border-radius:999px;background:transparent;cursor:pointer;font-size:13px;color:#0f1115}',
+    '.ds-mail-tab{padding:6px 12px;border:1px solid var(--ds-border);border-radius:999px;background:transparent;cursor:pointer;font-size:13px;color:var(--ds-fg)}',
     '.ds-mail-tab.active{background:#3964fe;color:#fff;border-color:#3964fe}',
-    '.ds-mail-filter{margin:10px 16px;padding:8px 10px;border:1px solid rgba(0,0,0,.15);border-radius:8px;font-size:13px;outline:none}',
+    '.ds-mail-filter{margin:10px 16px;padding:8px 10px;border:1px solid var(--ds-input-border);border-radius:8px;font-size:13px;outline:none;background:var(--ds-input-bg);color:var(--ds-fg)}',
+    '.ds-mail-filter::placeholder{color:var(--ds-fg-dim)}',
     '.ds-mail-list{flex:1;overflow:auto;padding:0 8px 8px}',
     '.ds-mail-row{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer}',
-    '.ds-mail-row:hover{background:rgba(38,49,72,.06)}',
-    '.ds-mail-row .ds-mail-date{color:#6b7280;font-size:12px;white-space:nowrap}',
-    '.ds-mail-row .ds-mail-sender{color:#374151;font-size:13px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.ds-mail-row:hover{background:var(--ds-hover)}',
+    '.ds-mail-row .ds-mail-date{color:var(--ds-fg-dim);font-size:12px;white-space:nowrap}',
+    '.ds-mail-row .ds-mail-sender{color:var(--ds-fg-mid);font-size:13px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.ds-mail-row .ds-mail-subj{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.ds-mail-status{padding:18px;text-align:center;color:#6b7280}',
-    '.ds-mail-more{margin:8px;padding:8px;width:calc(100% - 16px);border:1px solid rgba(0,0,0,.12);border-radius:8px;background:transparent;cursor:pointer}',
-    '.ds-mail-foot{display:flex;align-items:center;gap:10px;padding:12px 16px;border-top:1px solid rgba(0,0,0,.08)}',
-    '.ds-mail-foot button{padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid rgba(0,0,0,.12);background:transparent;color:#0f1115}',
+    '.ds-mail-status{padding:18px;text-align:center;color:var(--ds-fg-dim)}',
+    '.ds-mail-more{margin:8px;padding:8px;width:calc(100% - 16px);border:1px solid var(--ds-border);border-radius:8px;background:transparent;color:var(--ds-fg);cursor:pointer}',
+    '.ds-mail-foot{display:flex;align-items:center;gap:10px;padding:12px 16px;border-top:1px solid var(--ds-panel-border)}',
+    '.ds-mail-foot button{padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;border:1px solid var(--ds-border);background:transparent;color:var(--ds-fg)}',
     '.ds-mail-foot .ds-mail-ok{background:#3964fe;border-color:#3964fe;color:#fff}',
     '.ds-mail-foot .ds-mail-ok:disabled{opacity:.5;cursor:not-allowed}',
-    '.ds-mail-foot .ds-mail-refresh{background:transparent;color:#0f1115}',
+    '.ds-mail-foot .ds-mail-refresh{background:transparent;color:var(--ds-fg)}',
     '.ds-mail-foot .ds-mail-refresh:disabled{opacity:.6;cursor:default}',
-    '.ds-mail-count{color:#6b7280;font-size:13px}',
+    '.ds-mail-count{color:var(--ds-fg-dim);font-size:13px}',
   ].join('\n');
   document.head.appendChild(st);
 }
@@ -450,6 +616,7 @@ function openMailPicker() {
     + '<button class="ds-mail-cancel">取消</button><button class="ds-mail-ok" disabled>确定</button></div>'
     + '</div>';
   document.body.appendChild(overlay);
+  dsApplyTheme(); // 弹窗可能开在主题已切换之后：创建即上色
 
   var tabEls = overlay.querySelectorAll('.ds-mail-tab');
   for (var t = 0; t < tabEls.length; t++) {
@@ -717,11 +884,25 @@ function initDsbridge() {
   addButtons();
   renderMailButtonImmediately(); // 邮件按钮先渲染（不等锚点）
   tryPlaceMailButton(20);        // 随后再尝试移到回形针右侧
+  dsWatchTheme();                // 页面切主题时实时跟随
+  dsApplyTheme();                // 初始化先算一次（给已存在的注入元素上色）
   setTimeout(mailProbe, 4000);
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initDsbridge);
-} else {
-  initDsbridge();
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDsbridge);
+  } else {
+    initDsbridge();
+  }
+}
+
+// 本地单测出口（浏览器注入时 module 未定义，自动跳过；不影响页面行为）
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    dsParseColor: dsParseColor,
+    dsRelLuminance: dsRelLuminance,
+    dsThemeSignal: dsThemeSignal,
+    dsResolveDark: dsResolveDark,
+  };
 }
