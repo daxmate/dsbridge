@@ -107,6 +107,11 @@ const MAIL_DEFAULT_LIMIT = 20;   // /mails 默认返回条数
 const MAIL_MAX_LIMIT = 50;       // /mails 单次上限
 const MAIL_LOOKUP_WINDOW = 200;  // /mail 按 id 命中的最近消息范围（避免全库 whose）
 const MAIL_BODY_MAX = 20000;     // 正文最大字符数（超出砍尾部、保留头部）
+const MAIL_OS_TIMEOUT_MS = 30000;      // 单次 osascript 调用超时（列表 / 正文）
+const MAIL_CACHE_TTL_MS = 60000;       // 邮件列表内存缓存 TTL（60s）
+const MAIL_READY_DEADLINE_MS = 45000;  // 等待 Mail 就绪（含拉起）的上限
+const MAIL_READY_POLL_MS = 1000;       // 就绪轮询间隔
+const MAIL_CACHE_FILE = path.join(DATA_DIR, '.mail-cache.json'); // 列表缓存落盘（重开后仍热）
 
 // AppleScript 字符串字面量转义（只用固定白名单值 / 数字，不拼用户输入）
 function asStr(value) {
@@ -128,24 +133,125 @@ end asSanitized`;
 // AppleScript 调用唯一入口（任何 Apple Mail 交互都走这里）
 function runAppleScript(script) {
   return new Promise((resolve, reject) => {
-    execFile('osascript', ['-e', script], { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout);
+    execFile('osascript', ['-e', script], { maxBuffer: 32 * 1024 * 1024, timeout: MAIL_OS_TIMEOUT_MS }, (err, stdout) => {
+      if (err) {
+        if (err.killed || err.signal) reject(new Error('osascript timeout'));
+        else reject(err);
+      } else resolve(stdout);
     });
   });
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// Mail 是否在运行（不会拉起 Mail）
+function isMailRunning() {
+  return new Promise((resolve) => {
+    execFile('osascript', ['-e', 'application "Mail" is running'], { timeout: 8000 }, (err, stdout) => {
+      resolve(!err && String(stdout).trim() === 'true');
+    });
+  });
+}
+
+// AppleScript 是否已就绪（running ≠ AppleScript 就绪）
+function mailReadyOnce() {
+  return new Promise((resolve) => {
+    execFile('osascript', [
+      '-e', 'with timeout of 5 seconds',
+      '-e', 'tell application "Mail" to count of accounts',
+      '-e', 'end timeout',
+    ], { timeout: 8000 }, (err, stdout) => {
+      resolve(!err && String(stdout).trim().length > 0);
+    });
+  });
+}
+
+// 确保 Mail 就绪：未运行则拉起，随后轮询直到 deadline
+async function ensureMailReady(deadlineMs = MAIL_READY_DEADLINE_MS) {
+  if (!(await isMailRunning())) {
+    execFile('open', ['-a', 'Mail'], (err) => {
+      if (err) console.error('[dsbridge] 拉起 Mail 失败:', err.message);
+    });
+  }
+  const deadline = Date.now() + deadlineMs;
+  while (true) {
+    if (await mailReadyOnce()) return { ok: true };
+    if (Date.now() >= deadline) return { ok: false, error: 'mail-not-ready' };
+    await sleep(MAIL_READY_POLL_MS);
+  }
+}
+
+// ---- 邮件列表缓存（内存 TTL + 落盘）----
+const mailCache = new Map();      // mailbox -> { messages, limit, at }
+const mailRefreshing = new Map(); // mailbox -> Promise（后台刷新并发去重）
+
+function loadMailCache() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(MAIL_CACHE_FILE, 'utf8'));
+    for (const [mb, entry] of Object.entries(obj)) {
+      if (entry && Array.isArray(entry.messages)) {
+        mailCache.set(mb, {
+          messages: entry.messages,
+          limit: Number(entry.limit) || MAIL_DEFAULT_LIMIT,
+          at: Number(entry.at) || 0,
+        });
+      }
+    }
+  } catch { /* 坏文件 / 不存在：静默降级 */ }
+}
+
+function saveMailCache() {
+  try {
+    const obj = {};
+    for (const [mb, entry] of mailCache.entries()) obj[mb] = entry;
+    fs.writeFileSync(MAIL_CACHE_FILE, JSON.stringify(obj));
+  } catch (e) {
+    console.error('[dsbridge] 写邮件缓存失败:', e.message);
+  }
+}
+
+// 现场取列表（先确保 Mail 就绪，再走 osascript 超时）
+async function fetchMailList(mailbox, limit) {
+  const ready = await ensureMailReady();
+  if (!ready.ok) return { ok: false, error: ready.error };
+  const stdout = await runAppleScript(buildListScript(mailbox, limit));
+  return { ok: true, mailbox, messages: parseListOutput(stdout, mailbox) };
+}
+
+// 后台刷新（同一 mailbox 并发去重）
+function refreshMailBoxInBackground(mailbox, limit) {
+  if (mailRefreshing.has(mailbox)) return;
+  const p = (async () => {
+    try {
+      const result = await fetchMailList(mailbox, limit);
+      if (result.ok) {
+        mailCache.set(mailbox, { messages: result.messages, limit, at: Date.now() });
+        saveMailCache();
+      } else {
+        console.error('[dsbridge] 后台刷新邮件失败:', result.error);
+      }
+    } catch (e) {
+      console.error('[dsbridge] 后台刷新邮件异常:', e.message);
+    } finally {
+      mailRefreshing.delete(mailbox);
+    }
+  })();
+  mailRefreshing.set(mailbox, p);
 }
 
 // 列出某邮箱最近 limit 封（messages 1 thru N 即最新在前，已实测）
 function buildListScript(mailbox, limit) {
   return `tell application "Mail"
 	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
-	set cnt to count of messages of mb
 	set lim to ${limit}
-	if cnt > lim then set cnt to lim
 	set out to ""
-	repeat with i from 1 to cnt
-		set m to message i of mb
-		set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
+	repeat with i from 1 to lim
+		try
+			set m to message i of mb
+			set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
+		on error
+			exit repeat
+		end try
 	end repeat
 	return out
 end tell
@@ -204,16 +310,32 @@ function truncateBody(text, max) {
   return cut;
 }
 
-// POST /mails —— 列出某邮箱最近 N 封
+// POST /mails —— 列出某邮箱最近 N 封（内存 TTL 缓存 + 落盘；refresh 绕过）
 async function handleMails(body) {
   const mailbox = body && body.mailbox;
   if (!MAIL_BOXES.includes(mailbox)) return { ok: false, error: 'invalid mailbox' };
   let limit = Number(body && body.limit);
   if (!Number.isFinite(limit) || limit <= 0) limit = MAIL_DEFAULT_LIMIT;
   if (limit > MAIL_MAX_LIMIT) limit = MAIL_MAX_LIMIT;
+  const refresh = !!(body && body.refresh === true);
+
+  const cached = mailCache.get(mailbox);
+  if (!refresh && cached && Array.isArray(cached.messages)) {
+    const hit = (Date.now() - cached.at) <= MAIL_CACHE_TTL_MS && cached.limit >= limit;
+    if (hit) {
+      return { ok: true, cached: true, mailbox, messages: cached.messages.slice(0, limit) };
+    }
+    // 过期（或请求范围更大）但有旧值：立即返回旧的 + 后台刷新
+    refreshMailBoxInBackground(mailbox, Math.max(limit, cached.limit));
+    return { ok: true, cached: true, stale: true, mailbox, messages: cached.messages.slice(0, limit) };
+  }
+
   try {
-    const stdout = await runAppleScript(buildListScript(mailbox, limit));
-    return { ok: true, mailbox, messages: parseListOutput(stdout, mailbox) };
+    const result = await fetchMailList(mailbox, limit);
+    if (!result.ok) return result;
+    mailCache.set(mailbox, { messages: result.messages, limit, at: Date.now() });
+    saveMailCache();
+    return { ok: true, cached: false, mailbox, messages: result.messages };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -226,6 +348,8 @@ async function handleMail(body) {
   const id = Number(body && body.id);
   if (!Number.isFinite(id)) return { ok: false, error: 'invalid id' };
   try {
+    const ready = await ensureMailReady();
+    if (!ready.ok) return { ok: false, error: ready.error };
     const stdout = await runAppleScript(buildBodyScript(mailbox, id));
     if (String(stdout).startsWith('ERROR:notfound')) return { ok: false, error: 'message not found' };
     const nl = stdout.indexOf('\n');
@@ -292,6 +416,8 @@ function handleRequest(req, res) {
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: 'not found' }));
 }
+
+loadMailCache(); // 启动时载入落盘列表缓存（桥重启后仍热；坏文件静默降级）
 
 const server = http.createServer(handleRequest);
 const serverTls = https.createServer(TLS_OPTIONS, handleRequest);
