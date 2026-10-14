@@ -106,12 +106,17 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
 - **多选**：可多选，选 N 封生成 N 个独立 `.md` 附件
 - **内容**：主题 + 发件人 + 日期 + 纯文本正文；**不含原始附件**；正文超过 20000 字符时保留头部、砍掉尾部（旧的）
 - **免登录**：经本地桥 `osascript` 调 Apple Mail，无需登录；仅 Senkori 账号
+- **启动即渲染**：邮件按钮随界面初始化立即出现，随后再对齐到回形针右侧（找不到锚点也照常显示）
+- **Mail 自动拉起**：点开邮件按钮时若 Apple Mail 未运行，会自动拉起并等待就绪（约 1s 轮询，上限 ~45s）
+- **缓存提速**：邮件列表带 60s 内存缓存 + 落盘（`.mail-cache.json`），重开弹窗「秒出」；缓存过期先返回旧列表再后台刷新
+- **刷新按钮**：弹窗底部「已选 N 封」右侧有刷新按钮，可强制绕过缓存取最新列表（加载中禁用；出错时显示「重试」）
+- **超时兜底**：列表 / 正文的 osascript 调用与前端请求均设超时，避免永久卡在「加载中…」
 
 ### 邮件接口（bridge.js 新增，协议只增不改）
 
 | 接口 | 请求体 | 返回 |
 |---|---|---|
-| `POST /mails` | `{ mailbox, limit? }`（mailbox 取 INBOX / Archive / Sent Messages；limit 默认 20，上限 50） | `{ ok, mailbox, messages: [{ id, subject, sender, date, mailbox }] }` |
+| `POST /mails` | `{ mailbox, limit?, refresh? }`（mailbox 取 INBOX / Archive / Sent Messages；limit 默认 20，上限 50；refresh=true 强制绕过缓存） | `{ ok, cached, stale?, mailbox, messages: [{ id, subject, sender, date, mailbox }] }`（列表命中 60s 内存缓存时 cached=true，过期先返旧值 stale=true 再后台刷新） |
 | `POST /mail` | `{ mailbox, id }` | `{ ok, message: { id, subject, sender, date, mailbox, body } }`（body 为纯文本，截断到 20000 字符） |
 | `POST /probe` | 注入脚本上报的 DOM 探测信息 | `{ ok }`（仅写 bridge.log） |
 

@@ -94,6 +94,16 @@ curl -s -X POST "${BRIDGE_URL}/append" -H "Content-Type: application/json" -d '{
 node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(j.ok===true&&j.appended===1?0:1)' "${APP_JSON}" && pass "/append 追加 1 条" || fail "/append 追加 1 条"
 if ls "${DATA_DIR}"/*.jsonl >/dev/null 2>&1; then pass "对话 jsonl 已写入测试数据目录"; else fail "对话 jsonl 已写入测试数据目录"; fi
 
+echo "== 6) 缓存：第二次同参数 /mails 命中内存缓存 =="
+CACHE_JSON="$(mktemp /tmp/t-cache.XXXXXX)"
+curl -s -X POST "${BRIDGE_URL}/mails" -H "Content-Type: application/json" -d '{"mailbox":"INBOX","limit":20}' -o "${CACHE_JSON}"
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(j.ok===true&&j.cached===true&&Array.isArray(j.messages)&&j.messages.length>0&&j.messages.length<=20?0:1)' "${CACHE_JSON}" && pass "第二次 /mails 返回 cached:true" || fail "第二次 /mails 返回 cached:true"
+
+echo "== 7) refresh:true 绕过缓存 =="
+REFRESH_JSON="$(mktemp /tmp/t-refresh.XXXXXX)"
+curl -s -X POST "${BRIDGE_URL}/mails" -H "Content-Type: application/json" -d '{"mailbox":"INBOX","limit":20,"refresh":true}' -o "${REFRESH_JSON}"
+node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(j.ok===true&&j.cached===false&&Array.isArray(j.messages)&&j.messages.length>0&&j.messages.length<=20?0:1)' "${REFRESH_JSON}" && pass "refresh:true 返回 cached:false" || fail "refresh:true 返回 cached:false"
+
 echo "--- /mails 返回片段（前 400 字节）---"
 head -c 400 "${MAILS_JSON}"
 echo
