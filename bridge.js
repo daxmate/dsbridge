@@ -268,25 +268,28 @@ end tell
 ${AS_SANITIZE_HANDLER}`;
 }
 
-// 取某封正文：先在最近窗口内按 id 命中，未命中才回退全库 whose（实测 Archive 52k 也仅约 1s）
+// 取某封正文：优先用 whose by id 直取（实测 Archive 53k 稳定 ≈0.7s，与邮件位置无关），
+// 未命中（whose 对不存在的 id 报 -1728）或报错时，再回退到「最近窗口内逐条比对」的有界扫描。
 function buildBodyScript(mailbox, id) {
   return `tell application "Mail"
 	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
-	set cnt to count of messages of mb
-	set lim to ${MAIL_LOOKUP_WINDOW}
-	if cnt > lim then set cnt to lim
 	set found to missing value
-	repeat with i from 1 to cnt
-		set m to message i of mb
-		if (id of m) = ${id} then
-			set found to m
-			exit repeat
-		end if
-	end repeat
+	try
+		set found to (first message of mb whose id = ${id})
+	on error
+		set found to missing value
+	end try
 	if found is missing value then
-		try
-			set found to (first message of mb whose id = ${id})
-		end try
+		set cnt to count of messages of mb
+		set lim to ${MAIL_LOOKUP_WINDOW}
+		if cnt > lim then set cnt to lim
+		repeat with i from 1 to cnt
+			set m to message i of mb
+			if (id of m) = ${id} then
+				set found to m
+				exit repeat
+			end if
+		end repeat
 	end if
 	if found is missing value then return "ERROR:notfound"
 	set bodyText to (content of found) as text

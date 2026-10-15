@@ -640,8 +640,11 @@ function openMailPicker() {
 
 function closeMailPicker() {
   clearMailSlowHint();
+  // 关闭弹窗即清空选择：重开为干净状态，避免「已选 N 封」与当前实际勾选不符
+  // （取消 / 点遮罩 / 成功附加都走这里；取正文失败的「重试」路径不关闭弹窗，选择得以保留）
+  mailState.selected.clear();
   var o = document.getElementById('ds-mail-overlay');
-  if (o) o.remove();
+  if (o) { updateMailFooter(); o.remove(); }
 }
 
 function switchMailTab(mailbox) {
@@ -805,7 +808,9 @@ async function confirmMailPick() {
     var id = Number(key.slice(sep + 1));
     var r = await postToBridge({ mailbox: mailbox, id: id }, '/mail');
     if (!r.ok || !r.message) {
-      showTip('✗ 取邮件正文失败', '#ef4444');
+      var reason = (r.error && r.error.message) ? r.error.message : String(r.error || '未知错误');
+      reason = reason.replace(/^HTTP \d+:\s*/, '');
+      showTip('✗ 取邮件正文失败：' + reason, '#ef4444');
       if (okBtn) { okBtn.disabled = false; updateMailFooter(); }
       return;
     }
