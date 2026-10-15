@@ -105,7 +105,8 @@ const MAIL_ACCOUNT = 'Senkori';
 const MAIL_BOXES = ['INBOX', 'Archive', 'Sent Messages'];
 const MAIL_DEFAULT_LIMIT = 20;   // /mails 默认返回条数
 const MAIL_MAX_LIMIT = 50;       // /mails 单次上限
-const MAIL_LOOKUP_WINDOW = 200;  // /mail 按 id 命中的最近消息范围（避免全库 whose）
+const MAIL_SCAN_MAX = 50;        // /mail 兜底扫描迭代上限（whose 未命中时才走；由 200 收紧）
+const MAIL_SCAN_BUDGET_S = 5;    // /mail 兜底扫描时间闸（秒）；实测 Mail 的 tell 块内 with timeout 无效，靠 current date 自计时
 const MAIL_BODY_MAX = 20000;     // 正文最大字符数（超出砍尾部、保留头部）
 const MAIL_OS_TIMEOUT_MS = 30000;      // 单次 osascript 调用超时（列表 / 正文）
 const MAIL_CACHE_TTL_MS = 60000;       // 邮件列表内存缓存 TTL（60s）
@@ -269,7 +270,8 @@ ${AS_SANITIZE_HANDLER}`;
 }
 
 // 取某封正文：优先用 whose by id 直取（实测 Archive 53k 稳定 ≈0.7s，与邮件位置无关），
-// 未命中（whose 对不存在的 id 报 -1728）或报错时，再回退到「最近窗口内逐条比对」的有界扫描。
+// 未命中（whose 对不存在的 id 报 -1728）或报错时，再回退到有界扫描：迭代上限 MAIL_SCAN_MAX 封，
+// 且靠 current date 自计时、超 MAIL_SCAN_BUDGET_S 秒即停（实测 Mail 的 tell 块内 with timeout 无效）。
 function buildBodyScript(mailbox, id) {
   return `tell application "Mail"
 	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
@@ -281,14 +283,16 @@ function buildBodyScript(mailbox, id) {
 	end try
 	if found is missing value then
 		set cnt to count of messages of mb
-		set lim to ${MAIL_LOOKUP_WINDOW}
+		set lim to ${MAIL_SCAN_MAX}
 		if cnt > lim then set cnt to lim
+		set t0 to current date
 		repeat with i from 1 to cnt
 			set m to message i of mb
 			if (id of m) = ${id} then
 				set found to m
 				exit repeat
 			end if
+			if ((current date) - t0) ≥ ${MAIL_SCAN_BUDGET_S} then exit repeat
 		end repeat
 	end if
 	if found is missing value then return "ERROR:notfound"
