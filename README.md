@@ -43,8 +43,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| `bridge.js` | Node 本地桥：接收对话，写入 jsonl（HTTPS 8787 主 / HTTP 8786 备用）；另提供 `/mails`、`/mail` 邮件接口（Apple Mail，只读） |
-| `deepseek_inject.js` | Pake 注入脚本：自动同步 + 同步/导出/复制按钮（SVG 图标）+ 邮件附件按钮 |
+| `bridge.js` | Node 本地桥：接收对话，写入 jsonl（HTTPS 8787 主 / HTTP 8786 备用）；另提供 `/mails`、`/mail` 邮件接口（Apple Mail，只读）与 `/context/clipboard` 剪贴板接口 |
+| `deepseek_inject.js` | Pake 注入脚本：自动同步 + 同步/导出/复制按钮（SVG 图标）+ 邮件附件按钮 + 本机上下文按钮（文件 / 剪贴板） |
 | `pack_deepseek.sh` | 一键打包脚本：unset CC/CXX → 生成/信任证书 → 安装服务 → 打包 |
 | `com.dax.dsbridge.plist` | launchd 服务模板（`__DSBRIDGE_DIR__` 占位符，安装时替换） |
 | `cert.pem` / `key.pem` | 自签证书（**不入库**，首次由脚本生成） |
@@ -96,6 +96,7 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
   - **导出**：下载 Markdown 文件
   - **复制全部**：复制对话到剪贴板
   - **邮件附件**：从本机 Apple Mail（仅 Senkori 账号）挑一封或多封邮件作为附件
+  - **本机上下文**：输入框工具栏的附件按钮旁点开，选本机文件或读剪贴板，拼成文本块插入输入框（只插入，不发送）
 - 对 OpenClaw 说："读一下我今天的 DeepSeek 对话" / "接着我和 DeepSeek 聊的 XX 话题继续"
 
 ## 邮件附件
@@ -121,6 +122,7 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
 | `POST /mails` | `{ mailbox, limit?, refresh? }`（mailbox 取 INBOX / Archive / Sent Messages；limit 默认 20，上限 50；refresh=true 强制绕过缓存） | `{ ok, cached, stale?, mailbox, messages: [{ id, subject, sender, date, mailbox }] }`（列表命中 60s 内存缓存时 cached=true，过期先返旧值 stale=true 再后台刷新） |
 | `POST /mail` | `{ mailbox, id }` | `{ ok, message: { id, subject, sender, date, mailbox, body } }`（body 为纯文本，截断到 20000 字符） |
 | `POST /probe` | 注入脚本上报的 DOM 探测信息 | `{ ok }`（仅写 bridge.log） |
+| `POST /context/clipboard` | `{}` | `{ ok, text, bytes, truncated }`（macOS 剪贴板文本；上限 200 KB，超出截断 truncated=true） |
 
 失败返回 `{ ok: false, error: "..." }`（HTTP 200，与既有风格一致）。
 
@@ -155,6 +157,7 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
 - 对话落到本地文件后由你自己掌控
 - DeepSeek 侧存在跨用户缓存泄露风险（如 `<think` 标签漏洞，GitHub issue #840、CVE-2026-55604），**敏感信息谨慎输入**
 - 自签证书私钥 `key.pem` 不入库，仅本机使用
+- 本机上下文：文件内容只在本地读取，剪贴板经本机桥 `pbpaste` 读取；两者都只插入输入框，点发送前不出本机
 
 ## License
 
