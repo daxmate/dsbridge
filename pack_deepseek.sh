@@ -5,6 +5,11 @@ set -e
 # 脚本所在目录（兼容从任意位置调用）
 cd "$(dirname "$0")"
 
+# ========== build 号（YYYYMMDD.HHMM-<sha>，工作区脏时 +dirty） ==========
+BUILD_ID="$(date +%Y%m%d.%H%M)-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+if ! git diff --quiet --ignore-submodules HEAD -- 2>/dev/null; then BUILD_ID="${BUILD_ID}+dirty"; fi
+export DSBRIDGE_BUILD_ID="$BUILD_ID"
+
 # ========== 0. 前置条件检查（缺失则自动安装） ==========
 MISSING=""
 for cmd in node openssl pake; do
@@ -106,7 +111,22 @@ else
 fi
 
 # ========== 4. 打包 ==========
-echo "[pack] 开始打包 DeepSeek..."
+if pgrep -f 'pake-deepseek' >/dev/null 2>&1; then
+  echo "[pack] DeepSeek 正在运行，打包后需退出重开才能看到新 build 号"
+fi
+
+# 注入脚本副本：把 build 占位符替换成本次 build 号（原文件保留占位符）
+INJECT_TMP="$(mktemp "${TMPDIR:-/tmp}/dsbridge-inject.XXXXXX.js")"
+trap 'rm -f "$INJECT_TMP"' EXIT
+sed "s|__DSBRIDGE_BUILD__|$BUILD_ID|g" deepseek_inject.js > "$INJECT_TMP"
+
+echo "[pack] 开始打包 DeepSeek... (build=$BUILD_ID)"
 pake https://chat.deepseek.com --name DeepSeek \
-  --inject "$(pwd)/deepseek_inject.js" \
+  --inject "$INJECT_TMP" \
   --hide-on-close --install
+
+# 把 build 号写进安装后的 App（About 面板 + 注入面板底部都能看到）
+if ! ./scripts/stamp-build.sh /Applications/DeepSeek.app "$BUILD_ID"; then
+  echo "[pack] 错误: build 号写入 DeepSeek.app 失败" >&2
+  exit 1
+fi

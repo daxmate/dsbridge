@@ -71,6 +71,7 @@ cd ~/codes/dsbridge
 2. 生成自签名证书（如不存在）；加入系统信任（**首次需输入管理员密码**）
 3. 安装并启动 launchd 服务 `com.dax.dsbridge`（登录自启、崩溃自动拉起）
 4. 用 Pake 打包 DeepSeek App 并安装到 `/Applications`
+5. 写入可追踪 build 号 `YYYYMMDD.HHMM-<git short sha>`（工作区有未提交改动时带 `+dirty`），可在「关于 DeepSeek」与「本机上下文」面板底部查看
 
 ### 2. 手动启动本地桥（不打包时）
 

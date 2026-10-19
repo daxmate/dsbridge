@@ -11,6 +11,11 @@ const DSBRIDGE_FALLBACK_URLS = [
   'http://127.0.0.1:8787',
 ];
 
+// 打包时由 pack_deepseek.sh 把占位符替换成本次 build 号；未替换则回退 dev。
+// 占位符在文件里只出现这一处，且兜底判断不重复字面量（避免 sed 全局替换后误判成 dev）。
+var DSBRIDGE_BUILD = '__DSBRIDGE_BUILD__';
+if (DSBRIDGE_BUILD.slice(0, 2) === '__') DSBRIDGE_BUILD = 'dev';
+
 // DeepSeek 品牌蓝
 const DS_BLUE = '#3964fe';
 const DS_BLUE_LIGHT = '#5686fe';
@@ -1008,6 +1013,7 @@ function injectContextStyles() {
     '.ds-ctx-btn:disabled{opacity:.5;cursor:default}',
     '.ds-ctx-status{color:var(--ds-fg-dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}',
     '.ds-ctx-status.ds-ctx-error{color:#ef4444}',
+    '.ds-ctx-build{margin-left:auto;font-size:11px;color:var(--ds-fg-dim);opacity:.8;white-space:nowrap}',
     '.ds-ctx-spacer{flex:1}',
   ].join('\n');
   document.head.appendChild(st);
@@ -1087,6 +1093,7 @@ function ctxPanelHtml() {
     + '</div>'
     + '<div class="ds-ctx-actions">'
     + '<span class="ds-ctx-status"></span><span class="ds-ctx-spacer"></span>'
+    + '<span class="ds-ctx-build">build ' + DSBRIDGE_BUILD + '</span>'
     + '<button class="ds-ctx-btn ds-ctx-cancel" type="button">取消</button>'
     + '<button class="ds-ctx-btn primary ds-ctx-insert" type="button">插入到输入框</button>'
     + '</div>'
