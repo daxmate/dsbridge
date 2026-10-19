@@ -145,52 +145,6 @@ function runAppleScript(script) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// ---- 本机上下文：剪贴板读取 ----
-const CLIPBOARD_MAX_BYTES = 200 * 1024; // 返回文本上限（UTF-8 字节）
-
-function runPbpaste() {
-  return new Promise((resolve, reject) => {
-    execFile('pbpaste', [], { timeout: 3000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout);
-    });
-  });
-}
-
-// 按 UTF-8 字节上限截断，丢弃不完整的尾字符（不让多字节字符变乱码）
-function truncateUtf8(buf, maxBytes) {
-  let end = Math.min(maxBytes, buf.length);
-  while (end > 0) {
-    const last = buf[end - 1];
-    if ((last & 0x80) === 0) break; // ASCII 结尾，天然完整
-    let start = end - 1;
-    while (start > 0 && (buf[start] & 0xC0) === 0x80) start--;
-    const lead = buf[start];
-    const need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
-    if (start + need <= end) break; // 末尾字符完整
-    end = start;                    // 丢掉半个字符
-  }
-  return buf.subarray(0, end).toString('utf8');
-}
-
-// POST /context/clipboard —— 读 macOS 剪贴板文本；不落盘，日志只记 { bytes, truncated, ms }
-async function handleClipboard() {
-  const t0 = Date.now();
-  try {
-    const stdout = await runPbpaste();
-    const raw = Buffer.from(stdout, 'utf8');
-    const truncated = raw.length > CLIPBOARD_MAX_BYTES;
-    const text = truncated ? truncateUtf8(raw, CLIPBOARD_MAX_BYTES) : stdout;
-    const bytes = Buffer.byteLength(text, 'utf8');
-    console.log('[dsbridge][clipboard]', JSON.stringify({ bytes, truncated, ms: Date.now() - t0 }));
-    return { ok: true, text, bytes, truncated };
-  } catch (e) {
-    console.log('[dsbridge][clipboard]', JSON.stringify({ error: 'clipboard-unavailable', ms: Date.now() - t0 }));
-    return { ok: false, error: 'clipboard-unavailable' };
-  }
-}
-
-
 // Mail 是否在运行（不会拉起 Mail）
 function isMailRunning() {
   return new Promise((resolve) => {
@@ -445,7 +399,7 @@ function handleRequest(req, res) {
   }
 
   const pathname = req.url.split('?')[0];
-  const postRoutes = ['/append', '/open-url', '/mails', '/mail', '/probe', '/context/clipboard'];
+  const postRoutes = ['/append', '/open-url', '/mails', '/mail', '/probe'];
 
   if (req.method === 'POST' && postRoutes.includes(pathname)) {
     let data = '';
@@ -459,7 +413,6 @@ function handleRequest(req, res) {
         else if (pathname === '/append') result = handleAppend(parsed);
         else if (pathname === '/mails') result = await handleMails(parsed);
         else if (pathname === '/mail') result = await handleMail(parsed);
-        else if (pathname === '/context/clipboard') result = await handleClipboard();
         else result = handleProbe(parsed);
         // 诊断日志：仅 /mails、/mail（定位「app 到不了桥 / 结果与耗时」）；不改协议与返回
         if (pathname === '/mails' || pathname === '/mail') {

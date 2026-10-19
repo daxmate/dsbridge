@@ -115,17 +115,12 @@ if pgrep -f 'pake-deepseek' >/dev/null 2>&1; then
   echo "[pack] DeepSeek 正在运行，打包后需退出重开才能看到新 build 号"
 fi
 
-# 注入脚本副本：把 build 占位符替换成本次 build 号（原文件保留占位符）
-INJECT_TMP="$(mktemp "${TMPDIR:-/tmp}/dsbridge-inject.XXXXXX.js")"
-trap 'rm -f "$INJECT_TMP"' EXIT
-sed "s|__DSBRIDGE_BUILD__|$BUILD_ID|g" deepseek_inject.js > "$INJECT_TMP"
-
 echo "[pack] 开始打包 DeepSeek... (build=$BUILD_ID)"
 pake https://chat.deepseek.com --name DeepSeek \
-  --inject "$INJECT_TMP" \
+  --inject "$(pwd)/deepseek_inject.js" \
   --hide-on-close --install
 
-# 把 build 号写进安装后的 App（About 面板 + 注入面板底部都能看到）
+# 把 build 号写进安装后的 App（About 面板）
 if ! ./scripts/stamp-build.sh /Applications/DeepSeek.app "$BUILD_ID"; then
   echo "[pack] 错误: build 号写入 DeepSeek.app 失败" >&2
   exit 1
