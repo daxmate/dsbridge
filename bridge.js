@@ -104,11 +104,13 @@ function handleOpenUrl(body) {
 const MAIL_ACCOUNT = 'Senkori';
 const MAIL_BOXES = ['INBOX', 'Archive', 'Sent Messages'];
 const MAIL_DEFAULT_LIMIT = 20;   // /mails 默认返回条数
-const MAIL_MAX_LIMIT = 50;       // /mails 单次上限
+const MAIL_MAX_LIMIT = 100;      // /mails 单次上限（配合 offset 翻页，一次最多 100 封）
+const MAIL_CACHE_DEPTH_MAX = 200; // 前缀缓存最深层数（刷新保留已加载深度的上限）
 const MAIL_SCAN_MAX = 50;        // /mail 兜底扫描迭代上限（whose 未命中时才走；由 200 收紧）
 const MAIL_SCAN_BUDGET_S = 5;    // /mail 兜底扫描时间闸（秒）；实测 Mail 的 tell 块内 with timeout 无效，靠 current date 自计时
 const MAIL_BODY_MAX = 20000;     // 正文最大字符数（超出砍尾部、保留头部）
-const MAIL_OS_TIMEOUT_MS = 30000;      // 单次 osascript 调用超时（列表 / 正文）
+const MAIL_OS_TIMEOUT_MS = 30000;      // 单次 osascript 调用超时（正文）
+const MAIL_LIST_TIMEOUT_MS = 60000;    // 列表 osascript 超时（要取多封属性，比正文慢；大邮箱 100 条实测可达数十秒）
 const MAIL_CACHE_TTL_MS = 60000;       // 邮件列表内存缓存 TTL（60s）
 const MAIL_READY_DEADLINE_MS = 45000;  // 等待 Mail 就绪（含拉起）的上限
 const MAIL_READY_POLL_MS = 1000;       // 就绪轮询间隔
@@ -132,9 +134,9 @@ on asSanitized(s)
 end asSanitized`;
 
 // AppleScript 调用唯一入口（任何 Apple Mail 交互都走这里）
-function runAppleScript(script) {
+function runAppleScript(script, timeoutMs) {
   return new Promise((resolve, reject) => {
-    execFile('osascript', ['-e', script], { maxBuffer: 32 * 1024 * 1024, timeout: MAIL_OS_TIMEOUT_MS }, (err, stdout) => {
+    execFile('osascript', ['-e', script], { maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs || MAIL_OS_TIMEOUT_MS }, (err, stdout) => {
       if (err) {
         if (err.killed || err.signal) reject(new Error('osascript timeout'));
         else reject(err);
@@ -191,9 +193,11 @@ function loadMailCache() {
     const obj = JSON.parse(fs.readFileSync(MAIL_CACHE_FILE, 'utf8'));
     for (const [mb, entry] of Object.entries(obj)) {
       if (entry && Array.isArray(entry.messages)) {
+        const depth = entry.messages.length;
         mailCache.set(mb, {
           messages: entry.messages,
-          limit: Number(entry.limit) || MAIL_DEFAULT_LIMIT,
+          limit: Number(entry.limit) || depth || MAIL_DEFAULT_LIMIT,
+          total: Number.isFinite(Number(entry.total)) ? Number(entry.total) : depth,
           at: Number(entry.at) || 0,
         });
       }
@@ -211,22 +215,25 @@ function saveMailCache() {
   }
 }
 
-// 现场取列表（先确保 Mail 就绪，再走 osascript 超时）
-async function fetchMailList(mailbox, limit) {
+// 现场取窗口（先确保 Mail 就绪，再走 osascript 超时）
+// 返回 { ok, mailbox, messages, total }；total = 邮箱总封数（用于 hasMore 判定）
+async function fetchMailWindow(mailbox, offset, limit) {
   const ready = await ensureMailReady();
   if (!ready.ok) return { ok: false, error: ready.error };
-  const stdout = await runAppleScript(buildListScript(mailbox, limit));
-  return { ok: true, mailbox, messages: parseListOutput(stdout, mailbox) };
+  const stdout = await runAppleScript(buildListScript(mailbox, offset, limit), MAIL_LIST_TIMEOUT_MS);
+  const parsed = parseListOutput(stdout, mailbox);
+  return { ok: true, mailbox, messages: parsed.messages, total: parsed.total };
 }
 
-// 后台刷新（同一 mailbox 并发去重）
-function refreshMailBoxInBackground(mailbox, limit) {
+// 后台刷新（同一 mailbox 并发去重）；depth = 要保留的已加载深度，刷新不缩表
+function refreshMailBoxInBackground(mailbox, depth) {
   if (mailRefreshing.has(mailbox)) return;
+  const want = Math.min(MAIL_CACHE_DEPTH_MAX, Math.max(MAIL_DEFAULT_LIMIT, depth || 0));
   const p = (async () => {
     try {
-      const result = await fetchMailList(mailbox, limit);
+      const result = await fetchMailWindow(mailbox, 0, want);
       if (result.ok) {
-        mailCache.set(mailbox, { messages: result.messages, limit, at: Date.now() });
+        mailCache.set(mailbox, { messages: result.messages, limit: result.messages.length, total: result.total, at: Date.now() });
         saveMailCache();
       } else {
         console.error('[dsbridge] 后台刷新邮件失败:', result.error);
@@ -240,29 +247,35 @@ function refreshMailBoxInBackground(mailbox, limit) {
   mailRefreshing.set(mailbox, p);
 }
 
-// 列出某邮箱最近 limit 封（messages 1 thru N 即最新在前，已实测）
-// 性能：一次性解析消息列表（messages 1 thru lim）再逐条取属性，避免每条重复做邮箱查找；
+// 列出某邮箱的窗口 [offset, offset+limit)（messages 1 thru N 即最新在前，已实测）
+// 性能：一次性取消息列表（messages firstI thru lastI）再逐条取属性，避免每条重复做邮箱查找；
 //       Mail 不支持对「消息列表」做属性批取（id/subject of 列表 报 -1728），故逐条取属性。
-function buildListScript(mailbox, limit) {
+// 取某邮箱的窗口 [offset, offset+limit)：先取总封数，再按范围取。
+// 越界/空邮箱不再靠 error 兜底：范围先夹到 count 内，first > last 时返回空列表，只回 TOTAL 行。
+function buildListScript(mailbox, offset, limit) {
   return `tell application "Mail"
 	set mb to mailbox ${asStr(mailbox)} of account ${asStr(MAIL_ACCOUNT)}
+	set cnt to count of messages of mb
+	set off to ${offset}
 	set lim to ${limit}
-	try
-		set msgs to messages 1 thru lim of mb
-	on error
-		set msgs to {}
-		set cnt to count of messages of mb
-		if cnt > lim then set cnt to lim
-		repeat with i from 1 to cnt
-			set end of msgs to message i of mb
+	set firstI to off + 1
+	set lastI to off + lim
+	if lastI > cnt then set lastI to cnt
+	set out to "TOTAL" & tab & cnt & linefeed
+	if cnt > 0 and firstI >= 1 and firstI <= lastI then
+		try
+			set msgs to messages firstI thru lastI of mb
+		on error
+			set msgs to {}
+			repeat with i from firstI to lastI
+				set end of msgs to message i of mb
+			end repeat
+		end try
+		repeat with k from 1 to (count of msgs)
+			set m to item k of msgs
+			set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
 		end repeat
-	end try
-	set out to ""
-	set n to count of msgs
-	repeat with k from 1 to n
-		set m to item k of msgs
-		set out to out & (id of m) & tab & my asSanitized(subject of m) & tab & my asSanitized(sender of m) & tab & (((date received of m) as «class isot») as string) & linefeed
-	end repeat
+	end if
 	return out
 end tell
 
@@ -305,15 +318,18 @@ ${AS_SANITIZE_HANDLER}`;
 
 function parseListOutput(stdout, mailbox) {
   const messages = [];
+  let total = null;
   for (const line of String(stdout).split('\n')) {
     if (!line) continue;
     const parts = line.split('\t');
+    if (parts[0] === 'TOTAL') { total = Number(parts[1]); continue; }
     if (parts.length < 4) continue;
     const id = Number(parts[0]);
     if (!Number.isFinite(id)) continue;
     messages.push({ id, subject: parts[1], sender: parts[2], date: parts[3], mailbox });
   }
-  return messages;
+  if (!Number.isFinite(total)) total = messages.length;
+  return { total, messages };
 }
 
 // 保留头部、砍掉尾部；避免把代理对（emoji 等）拦腰截断
@@ -326,32 +342,78 @@ function truncateBody(text, max) {
   return cut;
 }
 
-// POST /mails —— 列出某邮箱最近 N 封（内存 TTL 缓存 + 落盘；refresh 绕过）
+// ---- /mails 分页辅助 ----
+// 整数夹取（offset / limit 都走这里，杜绝 NaN / 负数 / 巨大值）
+function clampInt(value, min, max, dflt) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return dflt;
+  const i = Math.floor(n);
+  if (i < min) return min;
+  if (i > max) return max;
+  return i;
+}
+
+// 从 { messages, total } 切出响应窗口；hasMore 由「绝对 offset + 本页条数」与 total 比较决定
+// （不是靠「本页是否满」；from 是相对本次 entry 的切片起点，absoluteOffset 是请求的真实 offset）
+function sliceMailPage(entry, from, limit, absoluteOffset) {
+  const total = Number.isFinite(entry.total) ? entry.total : entry.messages.length;
+  const messages = entry.messages.slice(from, from + limit);
+  const base = Number.isFinite(absoluteOffset) ? absoluteOffset : from;
+  return { messages, total, hasMore: base + messages.length < total };
+}
+
+// POST /mails —— 列表分页：offset（默认 0）+ limit（默认 20，单次上限 100）
+// 返回 { ok, mailbox, messages, offset, limit, total, hasMore }
 async function handleMails(body) {
   const mailbox = body && body.mailbox;
   if (!MAIL_BOXES.includes(mailbox)) return { ok: false, error: 'invalid mailbox' };
-  let limit = Number(body && body.limit);
-  if (!Number.isFinite(limit) || limit <= 0) limit = MAIL_DEFAULT_LIMIT;
-  if (limit > MAIL_MAX_LIMIT) limit = MAIL_MAX_LIMIT;
+  const offset = clampInt(body && body.offset, 0, 100000, 0);
+  const limit = clampInt(body && body.limit, 1, MAIL_MAX_LIMIT, MAIL_DEFAULT_LIMIT);
   const refresh = !!(body && body.refresh === true);
+  const end = offset + limit;
 
   const cached = mailCache.get(mailbox);
   if (!refresh && cached && Array.isArray(cached.messages)) {
-    const hit = (Date.now() - cached.at) <= MAIL_CACHE_TTL_MS && cached.limit >= limit;
-    if (hit) {
-      return { ok: true, cached: true, mailbox, messages: cached.messages.slice(0, limit) };
+    // 缓存覆盖本次窗口（已到最后时用 total 兜底），才算命中
+    const covered = cached.messages.length >= Math.min(end, cached.total);
+    if (covered) {
+      const fresh = (Date.now() - cached.at) <= MAIL_CACHE_TTL_MS;
+      if (!fresh) {
+        // 过期但有旧值：立即返回旧的 + 后台按「已加载深度」刷新（不缩表）
+        refreshMailBoxInBackground(mailbox, Math.max(cached.messages.length, end));
+      }
+      return {
+        ok: true, cached: true, stale: !fresh, mailbox, offset, limit,
+        ...sliceMailPage(cached, offset, limit),
+      };
     }
-    // 过期（或请求范围更大）但有旧值：立即返回旧的 + 后台刷新
-    refreshMailBoxInBackground(mailbox, Math.max(limit, cached.limit));
-    return { ok: true, cached: true, stale: true, mailbox, messages: cached.messages.slice(0, limit) };
   }
 
   try {
-    const result = await fetchMailList(mailbox, limit);
+    // 刷新且从头取：一次拉到「请求深度 / 既有深度」的较大者，避免刷新把缓存（和前端列表）缩回 limit
+    const keepDepth = refresh && offset === 0 && cached && Array.isArray(cached.messages)
+      ? cached.messages.length
+      : 0;
+    const fromHead = keepDepth > limit;
+    const fetchOffset = fromHead ? 0 : offset;
+    const fetchLimit = fromHead ? Math.min(MAIL_CACHE_DEPTH_MAX, keepDepth) : limit;
+    const result = await fetchMailWindow(mailbox, fetchOffset, fetchLimit);
     if (!result.ok) return result;
-    mailCache.set(mailbox, { messages: result.messages, limit, at: Date.now() });
-    saveMailCache();
-    return { ok: true, cached: false, mailbox, messages: result.messages };
+    if (fetchOffset === 0) {
+      mailCache.set(mailbox, {
+        messages: result.messages,
+        limit: result.messages.length,
+        total: result.total,
+        at: Date.now(),
+      });
+      saveMailCache();
+    }
+    // 窗口取回后按「相对本次 fetch 起点」切片，响应仍是请求的 [offset, offset+limit)
+    const entry = { messages: result.messages, total: result.total };
+    return {
+      ok: true, cached: false, mailbox, offset, limit,
+      ...sliceMailPage(entry, offset - fetchOffset, limit, offset),
+    };
   } catch (e) {
     return { ok: false, error: e.message };
   }

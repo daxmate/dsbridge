@@ -452,12 +452,12 @@ const MAIL_TABS = [
   { key: 'Sent Messages', label: '已发送' },
 ];
 const MAIL_PAGE_STEP = 20;
-const MAIL_PAGE_MAX = 50;
+const MAIL_PAGE_MAX = 100; // 与桥端 /mails 单次上限一致；翻页靠 offset，不再有总数硬顶
 const MAIL_FETCH_TIMEOUT_MS = 90000; // /mails 请求超时上限：> 服务端 osascript(30s) + Mail 就绪等待(45s)，保证前端晚于服务端拿到结果
 
 const mailState = {
   tab: 'INBOX',
-  lists: {},            // mailbox -> { messages:[], limit, reachedEnd, loading, error }
+  lists: {},            // mailbox -> { messages:[], total, hasMore, loading, error, gen }
   selected: new Set(),  // 'mailbox:id'
   filter: '',
 };
@@ -466,7 +466,7 @@ function mailKey(mailbox, id) { return mailbox + ':' + id; }
 
 function getMailList(mailbox) {
   if (!mailState.lists[mailbox]) {
-    mailState.lists[mailbox] = { messages: [], limit: MAIL_PAGE_STEP, reachedEnd: false, loading: false, error: null };
+    mailState.lists[mailbox] = { messages: [], total: 0, hasMore: true, loading: false, error: null, gen: 0 };
   }
   return mailState.lists[mailbox];
 }
@@ -575,8 +575,12 @@ function injectMailStyles() {
     '.ds-mail-tabs{display:flex;gap:6px;padding:10px 16px 0}',
     '.ds-mail-tab{padding:6px 12px;border:1px solid var(--ds-border);border-radius:999px;background:transparent;cursor:pointer;font-size:13px;color:var(--ds-fg)}',
     '.ds-mail-tab.active{background:#3964fe;color:#fff;border-color:#3964fe}',
-    '.ds-mail-filter{margin:10px 16px;padding:8px 10px;border:1px solid var(--ds-input-border);border-radius:8px;font-size:13px;outline:none;background:var(--ds-input-bg);color:var(--ds-fg)}',
+    '.ds-mail-filter-wrap{position:relative;margin:10px 16px}',
+    '.ds-mail-filter{display:block;width:100%;box-sizing:border-box;padding:8px 30px 8px 10px;border:1px solid var(--ds-input-border);border-radius:8px;font-size:13px;outline:none;background:var(--ds-input-bg);color:var(--ds-fg)}',
     '.ds-mail-filter::placeholder{color:var(--ds-fg-dim)}',
+    '.ds-mail-filter-clear{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:var(--ds-fg-dim);font-size:14px;line-height:1;cursor:pointer;padding:4px 6px;border-radius:6px}',
+    '.ds-mail-filter-clear:hover{background:var(--ds-hover);color:var(--ds-fg)}',
+    '.ds-mail-filter-clear[hidden]{display:none}',
     '.ds-mail-list{flex:1;overflow:auto;padding:0 8px 8px}',
     '.ds-mail-row{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;cursor:pointer}',
     '.ds-mail-row:hover{background:var(--ds-hover)}',
@@ -609,7 +613,7 @@ function openMailPicker() {
   overlay.innerHTML = '<div class="ds-mail-panel">'
     + '<div class="ds-mail-head">选择邮件作为附件</div>'
     + '<div class="ds-mail-tabs">' + tabsHtml + '</div>'
-    + '<input class="ds-mail-filter" type="text" placeholder="按发件人 / 主题过滤（仅已加载）">'
+    + '<div class="ds-mail-filter-wrap"><input class="ds-mail-filter" type="text" autocomplete="off" spellcheck="false" placeholder="按发件人 / 主题过滤（仅已加载）"><button type="button" class="ds-mail-filter-clear" aria-label="清空过滤" title="清空过滤（Esc）" hidden>✕</button></div>'
     + '<div class="ds-mail-list"><div class="ds-mail-status">加载中…</div></div>'
     + '<div class="ds-mail-foot"><span class="ds-mail-count">已选 0 封</span>'
     + '<button class="ds-mail-refresh" type="button">刷新</button><span style="flex:1"></span>'
@@ -624,8 +628,25 @@ function openMailPicker() {
       return function () { switchMailTab(el.getAttribute('data-mb')); };
     })(tabEls[t]);
   }
-  overlay.querySelector('.ds-mail-filter').oninput = function (e) {
+  var filterInput = overlay.querySelector('.ds-mail-filter');
+  filterInput.oninput = function (e) {
     mailState.filter = e.target.value || '';
+    updateMailFilterClear();
+    renderMailList();
+  };
+  filterInput.onkeydown = function (e) {
+    if (e.key !== 'Escape' && e.key !== 'Esc') return;
+    if (!mailState.filter) return; // 没有过滤词时 Esc 交给浏览器，不劫持
+    e.preventDefault();
+    e.stopPropagation();
+    resetMailFilter();
+    filterInput.focus();
+    renderMailList();
+  };
+  overlay.querySelector('.ds-mail-filter-clear').onclick = function () {
+    resetMailFilter();
+    var input = document.querySelector('#ds-mail-overlay .ds-mail-filter');
+    if (input) input.focus();
     renderMailList();
   };
   overlay.querySelector('.ds-mail-cancel').onclick = closeMailPicker;
@@ -633,13 +654,16 @@ function openMailPicker() {
   overlay.querySelector('.ds-mail-refresh').onclick = refreshMailTab;
   overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) closeMailPicker(); });
 
+  resetMailFilter(); // 重开弹窗：过滤词不留存，确定性回到全量
   updateMailTabs();
   renderMailList();
-  mailLoadTab(mailState.tab, false);
+  // 已有列表则按原深度刷新（重开不缩表）；没有则首屏
+  mailLoadTab(mailState.tab, false, { refresh: getMailList(mailState.tab).messages.length > 0 });
 }
 
 function closeMailPicker() {
   clearMailSlowHint();
+  resetMailFilter();
   // 关闭弹窗即清空选择：重开为干净状态，避免「已选 N 封」与当前实际勾选不符
   // （取消 / 点遮罩 / 成功附加都走这里；取正文失败的「重试」路径不关闭弹窗，选择得以保留）
   mailState.selected.clear();
@@ -648,6 +672,7 @@ function closeMailPicker() {
 }
 
 function switchMailTab(mailbox) {
+  if (mailState.tab !== mailbox) resetMailFilter(); // 切 tab 回全量视图
   mailState.tab = mailbox;
   updateMailTabs();
   var st = mailState.lists[mailbox];
@@ -663,6 +688,22 @@ function updateMailTabs() {
     var on = tabEls[i].getAttribute('data-mb') === mailState.tab;
     tabEls[i].className = 'ds-mail-tab' + (on ? ' active' : '');
   }
+}
+
+function updateMailFilterClear() {
+  var overlay = document.getElementById('ds-mail-overlay');
+  if (!overlay) return;
+  var btn = overlay.querySelector('.ds-mail-filter-clear');
+  if (btn) btn.hidden = !mailState.filter;
+}
+
+// 清空过滤并回到全量视图（✕ / Esc / 切 tab / 重开弹窗都走这里）
+function resetMailFilter() {
+  mailState.filter = '';
+  var overlay = document.getElementById('ds-mail-overlay');
+  var input = overlay && overlay.querySelector('.ds-mail-filter');
+  if (input) input.value = '';
+  updateMailFilterClear();
 }
 
 // 慢加载提示：>3s 仍无数据时把「加载中…」换成更具体的文案
@@ -683,45 +724,125 @@ function startMailSlowHint(mailbox) {
   }, 3000);
 }
 
-// 底部刷新按钮：以 refresh:true 重载当前 tab（绕过缓存）
+// 底部刷新按钮：以 refresh:true 重载当前 tab（保留已加载深度，不再缩回第一页）
 function refreshMailTab() {
   var st = getMailList(mailState.tab);
   if (st.loading) return;
   mailLoadTab(mailState.tab, false, { refresh: true });
 }
 
+function mailErrorText(r) {
+  var msg = (r.error && r.error.message) ? r.error.message : String(r.error);
+  if ((r.error && r.error.name === 'AbortError') || /abort/i.test(msg) || /timeout/i.test(msg)) return '请求超时，请点刷新重试';
+  if (/mail-not-ready/.test(msg)) return 'Mail 未能就绪，请点重试';
+  if (/invalid mailbox/.test(msg)) return '邮箱标识无效';
+  return msg;
+}
+
+// 单页请求（offset + limit；limit 单次 <= MAIL_PAGE_MAX）
+function mailFetchPage(mailbox, offset, limit, refresh) {
+  var body = { mailbox: mailbox, offset: offset, limit: limit };
+  if (refresh) body.refresh = true;
+  return postToBridge(body, '/mails', { timeoutMs: MAIL_FETCH_TIMEOUT_MS });
+}
+
+// 按 id 去重后追加（翻页 / 补齐共用）
+function appendMailMessages(st, batch) {
+  if (!batch || !batch.length) return 0;
+  var seen = {};
+  for (var i = 0; i < st.messages.length; i++) seen[st.messages[i].id] = true;
+  var added = 0;
+  for (var j = 0; j < batch.length; j++) {
+    var m = batch[j];
+    if (!m || seen[m.id]) continue;
+    seen[m.id] = true;
+    st.messages.push(m);
+    added++;
+  }
+  return added;
+}
+
+// 刷新：按「已加载深度」从 0 循环补齐（单次 <=100），拿到新列表后整体替换。
+// 深度不缩表；新邮件 / 已删除邮件也能正确反映。
+async function mailRefreshDepth(mailbox) {
+  var st = getMailList(mailbox);
+  var want = Math.max(MAIL_PAGE_STEP, st.messages.length);
+  var collected = [];
+  var seen = {};
+  var total = null;
+  var hasMore = false;
+  var offset = 0;
+  while (offset < want) {
+    var limit = Math.min(MAIL_PAGE_MAX, want - offset);
+    var r = await mailFetchPage(mailbox, offset, limit, true);
+    if (!r.ok) return r;
+    var batch = r.messages || [];
+    for (var i = 0; i < batch.length; i++) {
+      var m = batch[i];
+      if (!m || seen[m.id]) continue;
+      seen[m.id] = true;
+      collected.push(m);
+    }
+    total = Number.isFinite(r.total) ? r.total : collected.length;
+    hasMore = !!r.hasMore;
+    offset += batch.length;
+    if (!batch.length) break;
+  }
+  return { ok: true, messages: collected, total: total, hasMore: hasMore };
+}
+
 async function mailLoadTab(mailbox, more, opts) {
   var st = getMailList(mailbox);
   if (st.loading) return;
   var refresh = !!(opts && opts.refresh);
+  var gen = ++st.gen;
   st.loading = true;
   st.error = null;
-  var limit = more ? Math.min(st.limit + MAIL_PAGE_STEP, MAIL_PAGE_MAX) : MAIL_PAGE_STEP;
   renderMailList();
   startMailSlowHint(mailbox);
   try {
-    var r = await postToBridge({ mailbox: mailbox, limit: limit, refresh: refresh }, '/mails', { timeoutMs: MAIL_FETCH_TIMEOUT_MS });
-    if (!r.ok) {
-      var msg = (r.error && r.error.message) ? r.error.message : String(r.error);
-      if ((r.error && r.error.name === 'AbortError') || /abort/i.test(msg) || /timeout/i.test(msg)) {
-        st.error = '请求超时，请点刷新重试';
-      } else if (/mail-not-ready/.test(msg)) {
-        st.error = 'Mail 未能就绪，请点重试';
-      } else {
-        st.error = msg;
+    var r;
+    if (more && !refresh) {
+      // 「加载更多」：从已加载深度往后取（offset=messages.length）+ 按 id 去重追加；
+      // 若整页都是重复（期间来了新邮件、位置平移），自动前进后再试，最多 3 次，避免点不动。
+      var offset = st.messages.length;
+      var added = 0;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        r = await mailFetchPage(mailbox, offset, MAIL_PAGE_STEP, false);
+        if (gen !== st.gen) return;
+        if (!r.ok) { st.error = mailErrorText(r); return; }
+        var batch = r.messages || [];
+        added = appendMailMessages(st, batch);
+        if (Number.isFinite(r.total)) st.total = r.total;
+        st.hasMore = !!r.hasMore;
+        offset += batch.length;
+        if (added > 0 || !batch.length || !r.hasMore) break;
       }
       return;
     }
-    st.messages = r.messages || [];
-    st.limit = limit;
-    st.reachedEnd = st.messages.length < limit || limit >= MAIL_PAGE_MAX;
+    if (refresh && st.messages.length > MAIL_PAGE_STEP) {
+      // 刷新且已加载多页：循环补齐到原深度，再整体替换（期间 UI 保持旧列表，不闪空、不缩表）
+      r = await mailRefreshDepth(mailbox);
+      if (gen !== st.gen) return;
+      if (!r.ok) { st.error = mailErrorText(r); return; }
+      st.messages = r.messages;
+      st.total = Number.isFinite(r.total) ? r.total : st.messages.length;
+      st.hasMore = !!r.hasMore;
+      return;
+    }
+    // 首屏 / 浅层刷新：offset 0 取一页
+    r = await mailFetchPage(mailbox, 0, MAIL_PAGE_STEP, refresh);
+    if (gen !== st.gen) return;
+    if (!r.ok) { st.error = mailErrorText(r); return; }
+    st.messages = (r.messages || []).slice();
+    st.total = Number.isFinite(r.total) ? r.total : st.messages.length;
+    st.hasMore = !!r.hasMore;
   } finally {
     st.loading = false;
     clearMailSlowHint();
     renderMailList();
   }
 }
-
 function renderMailList() {
   var overlay = document.getElementById('ds-mail-overlay');
   if (!overlay) return;
@@ -730,8 +851,9 @@ function renderMailList() {
   var filter = mailState.filter.toLowerCase();
 
   if (st.loading && !st.messages.length) { list.innerHTML = '<div class="ds-mail-status">加载中…</div>'; updateMailFooter(); return; }
-  if (st.error) { list.innerHTML = '<div class="ds-mail-status">加载失败：' + escapeHtml(st.error) + '</div>'; updateMailFooter(); return; }
+  if (st.error && !st.messages.length) { list.innerHTML = '<div class="ds-mail-status">加载失败：' + escapeHtml(st.error) + '</div>'; updateMailFooter(); return; }
 
+  // 列表永远从 st.messages 派生（过滤只是视图层）：后台刷新落地后重渲染，也不会出现「过滤残留 + 空列表」
   var rows = [];
   for (var i = 0; i < st.messages.length; i++) {
     var m = st.messages[i];
@@ -762,13 +884,21 @@ function renderMailList() {
         return function () { toggleMailSelect(el.getAttribute('data-key'), el.checked); };
       })(cbs[c]);
     }
-    if (!st.reachedEnd) {
-      var more = document.createElement('button');
-      more.className = 'ds-mail-more';
-      more.textContent = st.loading ? '加载中…' : '加载更多';
-      more.onclick = function () { mailLoadTab(mailState.tab, true); };
-      list.appendChild(more);
-    }
+  }
+  if (st.error) {
+    var errEl = document.createElement('div');
+    errEl.className = 'ds-mail-status';
+    errEl.textContent = '加载失败：' + st.error;
+    list.appendChild(errEl);
+  }
+  if (st.hasMore) {
+    var more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'ds-mail-more';
+    more.textContent = st.loading ? '加载中…' : '加载更多';
+    more.disabled = !!st.loading;
+    more.onclick = function () { mailLoadTab(mailState.tab, true); };
+    list.appendChild(more);
   }
   updateMailFooter();
 }

@@ -119,7 +119,7 @@ launchctl bootout gui/$(id -u)/com.dax.dsbridge        # 停止
 
 | 接口 | 请求体 | 返回 |
 |---|---|---|
-| `POST /mails` | `{ mailbox, limit?, refresh? }`（mailbox 取 INBOX / Archive / Sent Messages；limit 默认 20，上限 50；refresh=true 强制绕过缓存） | `{ ok, cached, stale?, mailbox, messages: [{ id, subject, sender, date, mailbox }] }`（列表命中 60s 内存缓存时 cached=true，过期先返旧值 stale=true 再后台刷新） |
+| `POST /mails` | `{ mailbox, offset?, limit?, refresh? }`（mailbox 取 INBOX / Archive / Sent Messages；offset 默认 0，从第 offset 封开始；limit 默认 20，单次上限 100；refresh=true 强制绕过缓存并保留已缓存深度） | `{ ok, cached, stale?, mailbox, messages: [{ id, subject, sender, date, mailbox }], offset, limit, total, hasMore }`（total = 邮箱总封数，hasMore = 还有更早的邮件；列表命中 60s 内存缓存时 cached=true，过期先返旧值 stale=true 再后台刷新；`offset` 越界 / 尾部不足一页返回空或短页，不报错） |
 | `POST /mail` | `{ mailbox, id }` | `{ ok, message: { id, subject, sender, date, mailbox, body } }`（body 为纯文本，截断到 20000 字符） |
 | `POST /probe` | 注入脚本上报的 DOM 探测信息 | `{ ok }`（仅写 bridge.log） |
 
