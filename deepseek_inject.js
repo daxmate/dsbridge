@@ -454,6 +454,7 @@ const MAIL_TABS = [
 const MAIL_PAGE_STEP = 20;
 const MAIL_PAGE_MAX = 100; // 与桥端 /mails 单次上限一致；翻页靠 offset，不再有总数硬顶
 const MAIL_FETCH_TIMEOUT_MS = 90000; // /mails 请求超时上限：> 服务端 osascript(30s) + Mail 就绪等待(45s)，保证前端晚于服务端拿到结果
+const MAIL_LOAD_LOCK_MS = 120000; // 「加载中」锁的有效期：超过视为异常残留，强制解锁
 
 const mailState = {
   tab: 'INBOX',
@@ -466,7 +467,7 @@ function mailKey(mailbox, id) { return mailbox + ':' + id; }
 
 function getMailList(mailbox) {
   if (!mailState.lists[mailbox]) {
-    mailState.lists[mailbox] = { messages: [], total: 0, hasMore: true, loading: false, error: null, gen: 0 };
+    mailState.lists[mailbox] = { messages: [], total: 0, hasMore: true, loading: false, loadingSince: 0, error: null, gen: 0 };
   }
   return mailState.lists[mailbox];
 }
@@ -793,28 +794,53 @@ async function mailRefreshDepth(mailbox) {
 
 async function mailLoadTab(mailbox, more, opts) {
   var st = getMailList(mailbox);
-  if (st.loading) return;
   var refresh = !!(opts && opts.refresh);
+  var now = Date.now();
+  if (st.loading) {
+    var lockedMs = now - (st.loadingSince || 0);
+    // 带时间戳的锁：仍在有效期内才跳过；超过 120s 视为上次异常残留（如渲染抛错未复位），强制解锁继续
+    if (st.loadingSince && lockedMs <= MAIL_LOAD_LOCK_MS) return;
+    st.loading = false;
+    st.loadingSince = 0;
+    mailDiag('load-stale-lock', { mailbox: mailbox, more: !!more, lockedMs: lockedMs });
+  }
   var gen = ++st.gen;
   st.loading = true;
+  st.loadingSince = now;
   st.error = null;
-  renderMailList();
-  startMailSlowHint(mailbox);
   try {
+    renderMailList();
+    startMailSlowHint(mailbox);
     var r;
     if (more && !refresh) {
       // 「加载更多」：从已加载深度往后取（offset=messages.length）+ 按 id 去重追加；
       // 若整页都是重复（期间来了新邮件、位置平移），自动前进后再试，最多 3 次，避免点不动。
-      var offset = st.messages.length;
+      // 列表被清空时（messages.length === 0）按 offset=0 重新取首屏
+      var offset = st.messages.length || 0;
       var added = 0;
+      mailDiag('more-request', { mailbox: mailbox, offset: offset, messages: st.messages.length });
       for (var attempt = 0; attempt < 3; attempt++) {
         r = await mailFetchPage(mailbox, offset, MAIL_PAGE_STEP, false);
         if (gen !== st.gen) return;
-        if (!r.ok) { st.error = mailErrorText(r); return; }
+        if (!r.ok) {
+          st.error = mailErrorText(r);
+          mailDiag('more-error', { mailbox: mailbox, offset: offset, error: st.error });
+          return;
+        }
         var batch = r.messages || [];
         added = appendMailMessages(st, batch);
         if (Number.isFinite(r.total)) st.total = r.total;
         st.hasMore = !!r.hasMore;
+        mailDiag('more-response', {
+          mailbox: mailbox,
+          offset: offset,
+          attempt: attempt,
+          returned: batch.length,
+          added: added,
+          messages: st.messages.length,
+          total: st.total,
+          hasMore: st.hasMore,
+        });
         offset += batch.length;
         if (added > 0 || !batch.length || !r.hasMore) break;
       }
@@ -837,10 +863,22 @@ async function mailLoadTab(mailbox, more, opts) {
     st.messages = (r.messages || []).slice();
     st.total = Number.isFinite(r.total) ? r.total : st.messages.length;
     st.hasMore = !!r.hasMore;
+  } catch (e) {
+    var errMsg = (e && e.message) ? e.message : String(e);
+    st.error = '加载异常：' + errMsg;
+    mailDiag('load-error', { mailbox: mailbox, more: !!more, refresh: refresh, error: errMsg });
   } finally {
-    st.loading = false;
-    clearMailSlowHint();
-    renderMailList();
+    // 只有仍是本次请求（gen 未变）才复位，避免把后发的请求解锁；异常路径也一定复位
+    if (gen === st.gen) {
+      st.loading = false;
+      st.loadingSince = 0;
+      clearMailSlowHint();
+      try {
+        renderMailList();
+      } catch (e2) {
+        mailDiag('render-error', { mailbox: mailbox, error: (e2 && e2.message) ? e2.message : String(e2) });
+      }
+    }
   }
 }
 function renderMailList() {
@@ -897,7 +935,18 @@ function renderMailList() {
     more.className = 'ds-mail-more';
     more.textContent = st.loading ? '加载中…' : '加载更多';
     more.disabled = !!st.loading;
-    more.onclick = function () { mailLoadTab(mailState.tab, true); };
+    more.onclick = function () {
+      var cur = getMailList(mailState.tab);
+      mailDiag('more-click', {
+        mailbox: mailState.tab,
+        loading: cur.loading,
+        loadingSince: cur.loadingSince || 0,
+        hasMore: cur.hasMore,
+        messages: cur.messages.length,
+        filter: mailState.filter,
+      });
+      mailLoadTab(mailState.tab, true);
+    };
     list.appendChild(more);
   }
   updateMailFooter();
@@ -999,6 +1048,20 @@ function insertMailsAsText(files) {
 }
 
 // ---------- 诊断上报（失败静默，不影响主流程） ----------
+// 邮件面板事件上报：body 带 { mailDiag: event, ...data }，桥端 /probe 会打进 bridge.log
+function mailDiag(event, data) {
+  try {
+    var body = { mailDiag: event, ts: Date.now() };
+    if (data) {
+      for (var k in data) {
+        if (Object.prototype.hasOwnProperty.call(data, k)) body[k] = data[k];
+      }
+    }
+    var p = postToBridge(body, '/probe');
+    if (p && typeof p.catch === 'function') p.catch(function () { /* 静默 */ });
+  } catch (e) { /* 静默 */ }
+}
+
 function mailProbe() {
   try {
     var attach = findAttachButton();
